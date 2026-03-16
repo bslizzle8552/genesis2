@@ -284,6 +284,17 @@ class SimulationEngine:
                 else:
                     if random.random() < 0.25:
                         agent.energy += REWARDS["catch_incorrect"]
+                        board_events.append(
+                            {
+                                "generation": generation,
+                                "message_type": "catch_incorrect",
+                                "agent_id": agent.agent_id,
+                                "problem_id": best.problem_id,
+                                "tier": best.tier,
+                                "domain": best.domain,
+                                "detail": f"{agent.agent_id} flagged incorrect work on {best.problem_id}",
+                            }
+                        )
 
                 subtasks += 1
                 totals["subtasks"] += 1
@@ -398,6 +409,17 @@ class SimulationEngine:
             "report": report,
             "lineages": lineage_members,
             "config": asdict(self.config),
+            "problems": [
+                {
+                    "problem_id": p.problem_id,
+                    "domain": p.domain,
+                    "tier": p.tier,
+                    "solved": p.solved,
+                    "verified": p.verified,
+                    "owner_id": p.owner_id,
+                }
+                for p in all_problems
+            ],
         }
 
         markdown_path = Path(summary_path).with_name("run_summary.md")

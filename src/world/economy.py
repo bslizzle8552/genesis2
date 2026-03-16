@@ -1,8 +1,11 @@
 REWARDS = {
-    "correct_solution": 20,
-    "successful_verification": 6,
-    "catch_incorrect": 10,
-    "useful_subtask": 8,
+    "correct_solution": 12,
+    "successful_verification": 9,
+    "catch_incorrect": 12,
+    "useful_subtask": 10,
+    "useful_critique": 8,
+    "used_decomposition": 9,
+    "integration_bonus": 7,
     "artifact_reuse": 6,
 }
 

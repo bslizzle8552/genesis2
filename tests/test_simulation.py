@@ -25,5 +25,18 @@ def test_simulation_outputs_report_and_markdown(tmp_path):
 
     assert "report" in result
     assert "warning_flags" in result["report"]
+    assert "no_api_capability_ceiling" in result["report"]
     assert Path(result["markdown_summary_path"]).exists()
     assert len(result["board_messages"]) >= 1
+
+
+def test_problem_ledger_fields_are_exposed(tmp_path):
+    cfg = SimulationConfig(seed=5, agents=6, generations=5, tasks_per_generation=4, log_dir=str(tmp_path))
+    result = SimulationEngine(cfg).run()
+
+    problem = result["problems"][0]
+    assert "prompt_text" in problem
+    assert "status" in problem
+    assert "agents_involved" in problem
+    assert "contribution_chain" in problem
+    assert "reward_split" in problem

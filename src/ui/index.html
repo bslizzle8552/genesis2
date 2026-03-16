@@ -25,6 +25,8 @@
     pre { margin:0; white-space:pre-wrap; word-break:break-word; background:#0c1425; border:1px solid #213158; border-radius:8px; padding:10px; }
     .muted { color:#91a6ce; font-size:12px; }
     .btn-inline { width:auto; padding:4px 8px; font-size:11px; }
+    .bar { display:block; height:10px; background:#2f6df6; border-radius:3px; }
+    details { margin-top:8px; }
   </style>
 </head>
 <body>
@@ -66,15 +68,15 @@
     <button class="tab" data-tab="markdown">Markdown</button>
   </div>
 
-  <div class="panel active" id="dashboard"><div class="card"><div class="grid2" id="metrics"></div></div></div>
+  <div class="panel active" id="dashboard">
+    <div class="card"><div class="grid2" id="metrics"></div></div>
+    <div class="card"><h3>Energy Histogram</h3><table><thead><tr><th>Bucket</th><th>Count</th><th>Distribution</th></tr></thead><tbody id="energyHistogram"></tbody></table></div>
+    <div class="card"><h3>Top 10 Richest Agents</h3><pre id="richestAgents">No data.</pre></div>
+  </div>
 
   <div class="panel" id="report">
-    <div class="card">
-      <h3>No-API Capability Ceiling</h3>
-      <div class="grid2" id="ceilingSummary"></div>
-      <h3 style="margin-top:12px;">Readable Run Answers</h3>
-      <pre id="readableSummary">No report yet.</pre>
-    </div>
+    <div class="card"><h3>Run Diagnostics (Human Readable)</h3><pre id="humanReport">No report yet.</pre></div>
+    <div class="card"><h3>Raw Debug Data</h3><div id="rawDebug"></div></div>
   </div>
 
   <div class="panel" id="ledger">
@@ -91,14 +93,11 @@
         <label>Agent<input id="fAgent" placeholder="e.g. A4"></label>
       </div>
       <table>
-        <thead><tr><th>ID</th><th>Gen</th><th>Tier</th><th>Domain</th><th>Problem Text</th><th>Status</th><th>Resolution</th><th>Time</th><th>Agents</th><th>Contribution Chain</th><th>Reward Split</th><th>Detail</th></tr></thead>
+        <thead><tr><th>ID</th><th>Gen</th><th>Tier</th><th>Domain</th><th>Problem Text</th><th>Status</th><th>Solo/Collab</th><th>Agents</th><th>Reward Split</th><th>Contribution Chain</th><th>Detail</th></tr></thead>
         <tbody id="ledgerTable"></tbody>
       </table>
     </div>
-    <div class="card">
-      <h3>Problem Detail View</h3>
-      <pre id="problemDetail">Click "View" in the ledger.</pre>
-    </div>
+    <div class="card"><h3>Problem Detail View</h3><pre id="problemDetail">Click "View" in the ledger.</pre></div>
   </div>
 
   <div class="panel" id="board"><div class="card"><h3>Board Messages</h3><pre id="boardOut">No board messages yet.</pre></div></div>
@@ -118,31 +117,41 @@ function applyPreset(p){ if(!p) return; fields.forEach(k=>{ if(p[k]!==undefined&
 async function loadPresets(){ const data=await (await fetch('/api/presets')).json(); const sel=document.getElementById('preset'); sel.innerHTML=''; data.presets.forEach(p=>{presetMap[p.id]=p; const o=document.createElement('option'); o.value=p.id;o.textContent=p.label;sel.appendChild(o);}); if(data.presets[0]){sel.value=data.presets[0].id;applyPreset(data.presets[0]);} sel.onchange=()=>applyPreset(presetMap[sel.value]); }
 
 function renderDashboard(r){
-  const t=r.timeline||[]; const latest=t[t.length-1]||{}; const noApi=r.report?.no_api_capability_ceiling||{};
-  const rows=[
-    ["Final population", r.final_population], ["Total problems", (r.problems||[]).length], ["Solved", r.report?.problems?.solved||0], ["Unsolved", r.report?.problems?.unsolved||0],
-    ["Carrying capacity est.", r.report?.ecosystem_diagnostics?.carrying_capacity?.estimated_population||0], ["Reproduction bottleneck risk", r.report?.ecosystem_diagnostics?.reproduction_bottleneck_risk||"n/a"], ["Diversity collapse risk", r.report?.ecosystem_diagnostics?.diversity_collapse_risk||"n/a"],
-    ["No-API plateau", String(noApi.plateau_detected)], ["Improved dimensions", (noApi.improved_dimensions||[]).join(', ')||'none'], ["Plateaued dimensions", (noApi.plateaued_dimensions||[]).join(', ')||'none'],
-    ["Last generation", latest.generation||0], ["Avg energy", (latest.energy_distribution?.mean||0).toFixed(2)], ["Collab share", ((noApi.collaboration_effect?.collaborative_share||0)*100).toFixed(1)+'%']
-  ];
+  const t=r.timeline||[]; const latest=t[t.length-1]||{}; const obs=r.report?.observability||{}; const noApi=r.report?.no_api_capability_ceiling||{};
+  const rows=[["Final population", r.final_population],["Total problems",(r.problems||[]).length],["Solved",r.report?.problems?.solved||0],["Unsolved",r.report?.problems?.unsolved||0],["Energy min",obs.energy?.stats?.min||0],["Energy median",obs.energy?.stats?.median||0],["Energy mean",obs.energy?.stats?.mean||0],["Energy p90",obs.energy?.stats?.p90||0],["Energy p99",obs.energy?.stats?.p99||0],["Unique reproducers",obs.reproduction?.unique_reproducers||0],["Repeat reproducers",obs.reproduction?.repeat_reproducers||0],["Last generation",latest.generation||0],["No-API plateau",String(noApi.plateau_detected)],["Observed plateau dims",(obs.plateau?.plateau_dimensions||[]).join(', ')||'none']];
   document.getElementById('metrics').innerHTML=rows.map(([k,val])=>`<div class="kpi"><div class="muted">${k}</div><div><strong>${val}</strong></div></div>`).join('');
+
+  const hist=obs.energy?.histogram||[]; const max=Math.max(1,...hist.map(h=>h.count||0));
+  document.getElementById('energyHistogram').innerHTML=hist.map(h=>`<tr><td>${h.start} - ${h.end}</td><td>${h.count}</td><td><span class="bar" style="width:${Math.round((h.count/max)*100)}%"></span></td></tr>`).join('') || '<tr><td colspan="3">No data.</td></tr>';
+  document.getElementById('richestAgents').textContent=JSON.stringify(obs.energy?.top_10_richest||[], null, 2);
 }
 
 function renderReport(r){
-  const c=r.report?.no_api_capability_ceiling||{};
-  const cards=[
-    ["Success by tier over time", JSON.stringify(c.tier_success_over_time||{}, null, 2)],
-    ["Success by domain over time", JSON.stringify(c.domain_success_over_time||{}, null, 2)],
-    ["First-50 vs Last-50", JSON.stringify(c.first_50_vs_last_50||{}, null, 2)],
-    ["Founder baseline vs evolved", JSON.stringify(c.founder_vs_evolved||{}, null, 2)],
-    ["Unsolved tiers/domains", `tiers=${(c.unsolved_tiers||[]).join(', ')||'none'} | domains=${(c.unsolved_domains||[]).join(', ')||'none'}`],
-    ["Collaboration/artifact impact", JSON.stringify({collaboration:c.collaboration_effect, artifacts:c.artifact_effect}, null, 2)],
-    ["Ecosystem diagnostics", JSON.stringify(r.report?.ecosystem_diagnostics||{}, null, 2)],
-    ["Role reproduction", JSON.stringify(r.report?.role_reproduction||{}, null, 2)],
-    ["Diversity support", JSON.stringify(r.report?.diversity_support||{}, null, 2)],
+  const obs=r.report?.observability||{}; const p=obs.plateau||{};
+  const human=[
+    `Energy stats: min=${obs.energy?.stats?.min||0}, median=${obs.energy?.stats?.median||0}, mean=${obs.energy?.stats?.mean||0}, p90=${obs.energy?.stats?.p90||0}, p99=${obs.energy?.stats?.p99||0}`,
+    `Reproduction: unique reproducers=${obs.reproduction?.unique_reproducers||0}, repeat reproducers=${obs.reproduction?.repeat_reproducers||0}`,
+    `Collaboration success: solo=${obs.collaboration?.success_rate_solo||0}, collaborative=${obs.collaboration?.success_rate_collaborative||0}`,
+    `Collaboration share by tier: ${JSON.stringify(obs.collaboration?.share_by_tier||{})}`,
+    `Collaboration share by domain: ${JSON.stringify(obs.collaboration?.share_by_domain||{})}`,
+    `Contribution reward totals: ${JSON.stringify(obs.contribution?.reward_totals_by_type||{})}`,
+    `Plateau detected: ${String(p.plateau_detected)} | dimensions: ${(p.plateau_dimensions||[]).join(', ')||'none'}`,
+    `First-50 vs Last-50 solve by tier: ${JSON.stringify({first:p.first_50?.solve_rate_by_tier,last:p.last_50?.solve_rate_by_tier})}`,
+    `First-50 vs Last-50 solve by domain: ${JSON.stringify({first:p.first_50?.solve_rate_by_domain,last:p.last_50?.solve_rate_by_domain})}`,
+    `First-50 vs Last-50 collaboration share: ${JSON.stringify({first:p.first_50?.collaboration_share,last:p.last_50?.collaboration_share})}`,
   ];
-  document.getElementById('ceilingSummary').innerHTML=cards.map(([k,val])=>`<div class="kpi"><div class="muted">${k}</div><pre>${val}</pre></div>`).join('');
-  document.getElementById('readableSummary').textContent=JSON.stringify(r.report?.readable_summary||{}, null, 2);
+  document.getElementById('humanReport').textContent=human.join('\n');
+
+  const rawSections=[
+    ['Energy diagnostics', obs.energy],
+    ['Reproduction diagnostics', obs.reproduction],
+    ['Contribution diagnostics', obs.contribution],
+    ['Collaboration diagnostics', obs.collaboration],
+    ['Diversity diagnostics', obs.diversity],
+    ['Plateau diagnostics', obs.plateau],
+    ['Readable summary', r.report?.readable_summary||{}],
+  ];
+  document.getElementById('rawDebug').innerHTML=rawSections.map(([title,data])=>`<details><summary>${title}</summary><pre>${JSON.stringify(data||{}, null, 2)}</pre></details>`).join('');
 }
 
 function refreshLedger(){
@@ -156,30 +165,16 @@ function refreshLedger(){
   const tier=v('fTier'), domain=v('fDomain'), status=v('fStatus'), mode=v('fMode');
   const lineage=v('fLineage').trim(), agent=v('fAgent').trim();
 
-  const filt=problems.filter(p=>
-    p.generation>=minGen && p.generation<=maxGen && (!tier||String(p.tier)===tier) && (!domain||p.domain===domain) && (!status||p.status===status) && (!mode||p.resolution_mode===mode)
-    && (!agent||p.agents_involved.includes(agent)||p.owner_id===agent)
-    && (!lineage||p.agents_involved.some(aid=>String(agentsById[aid]?.lineage_id||'').includes(lineage))||String(agentsById[p.owner_id]?.lineage_id||'').includes(lineage))
-  );
+  const filt=problems.filter(p=>p.generation>=minGen && p.generation<=maxGen && (!tier||String(p.tier)===tier) && (!domain||p.domain===domain) && (!status||p.status===status) && (!mode||p.resolution_mode===mode) && (!agent||p.agents_involved.includes(agent)||p.owner_id===agent) && (!lineage||p.agents_involved.some(aid=>String(agentsById[aid]?.lineage_id||'').includes(lineage))||String(agentsById[p.owner_id]?.lineage_id||'').includes(lineage)));
 
-  document.getElementById('ledgerTable').innerHTML=filt.map(p=>`<tr>
-    <td>${p.problem_id}</td><td>${p.generation}</td><td>${p.tier}</td><td>${p.domain}</td><td>${p.prompt_text}</td><td>${p.status}</td><td>${p.resolution_mode}</td>
-    <td>${p.time_to_solve===null?'-':p.time_to_solve}</td><td>${p.agents_involved.join(', ')||'-'}</td>
-    <td>${(p.contribution_chain||[]).map(c=>`${c.agent_id}:${c.type}`).join(' → ')||'-'}</td>
-    <td>${Object.entries(p.reward_split||{}).map(([a,x])=>`${a}:${x}`).join(', ')||'-'}</td>
-    <td><button class="btn-inline" onclick="showProblem('${p.problem_id}')">View</button></td>
-  </tr>`).join('');
+  document.getElementById('ledgerTable').innerHTML=filt.map(p=>`<tr><td>${p.problem_id}</td><td>${p.generation}</td><td>${p.tier}</td><td>${p.domain}</td><td>${p.prompt_text}</td><td>${p.status}</td><td>${p.resolution_mode}</td><td>${p.agents_involved.join(', ')||'-'}</td><td>${Object.entries(p.reward_split||{}).map(([a,x])=>`${a}:${x}`).join(', ')||'-'}</td><td>${(p.contribution_chain||[]).map(c=>`${c.agent_id}:${c.type}`).join(' → ')||'-'}</td><td><button class="btn-inline" onclick="showProblem('${p.problem_id}')">View</button></td></tr>`).join('');
 }
 
 window.showProblem=(pid)=>{
   if(!currentResult) return;
   const p=(currentResult.problems||[]).find(x=>x.problem_id===pid); if(!p) return;
   const msgs=(currentResult.board_messages||[]).filter(m=>m.problem_id===pid);
-  document.getElementById('problemDetail').textContent=JSON.stringify({
-    problem_id:p.problem_id, original_problem_text:p.prompt_text, final_outcome:p.final_outcome, payout_attribution:p.payout_attribution,
-    agents_involved:p.agents_involved, contribution_chain:p.contribution_chain, contributions_used:(p.contribution_chain||[]).map(c=>c.type),
-    related_board_messages:msgs,
-  }, null, 2);
+  document.getElementById('problemDetail').textContent=JSON.stringify({problem_id:p.problem_id,generation:p.generation,tier:p.tier,domain:p.domain,full_problem_text:p.prompt_text,status:p.status,resolution_mode:p.resolution_mode,agents_involved:p.agents_involved,reward_split:p.reward_split,contribution_chain:p.contribution_chain,contribution_chain_expected:['plan','subtask','verification','critique','final integration'],related_board_messages:msgs}, null, 2);
 };
 
 function renderBoard(r){ document.getElementById('boardOut').textContent=JSON.stringify(r.board_messages||[], null, 2); }
@@ -191,14 +186,7 @@ async function startRun(){
   const res=await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   const data=await res.json(); if(data.error) throw new Error(data.error);
 }
-async function poll(){
-  const data=await (await fetch('/api/state')).json();
-  const s=document.getElementById('status');
-  if(data.status==='running'){ const p=data.progress||{}; s.textContent=`Running gen ${p.generation||0}, pop ${p.population||0}`; return false; }
-  if(data.status==='done'){ s.textContent=`Done. ${data.result.summary_path}`; renderAll(data.result); document.getElementById('runBtn').disabled=false; return true; }
-  if(data.status==='error'){ s.textContent=`Error: ${data.error}`; document.getElementById('runBtn').disabled=false; return true; }
-  return false;
-}
+async function poll(){ const data=await (await fetch('/api/state')).json(); const s=document.getElementById('status'); if(data.status==='running'){ const p=data.progress||{}; s.textContent=`Running gen ${p.generation||0}, pop ${p.population||0}`; return false; } if(data.status==='done'){ s.textContent=`Done. ${data.result.summary_path}`; renderAll(data.result); document.getElementById('runBtn').disabled=false; return true; } if(data.status==='error'){ s.textContent=`Error: ${data.error}`; document.getElementById('runBtn').disabled=false; return true; } return false; }
 
 document.getElementById('runBtn').onclick=async()=>{ try{document.getElementById('runBtn').disabled=true; await startRun(); let done=false; while(!done){ await new Promise(r=>setTimeout(r,900)); done=await poll(); }}catch(e){document.getElementById('status').textContent=e.message; document.getElementById('runBtn').disabled=false;}};
 ['fGenMin','fGenMax','fTier','fDomain','fStatus','fMode','fLineage','fAgent'].forEach(id=>document.getElementById(id).addEventListener('input', refreshLedger));

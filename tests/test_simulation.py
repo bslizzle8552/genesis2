@@ -42,3 +42,22 @@ def test_problem_ledger_fields_are_exposed(tmp_path):
     assert "agents_involved" in problem
     assert "contribution_chain" in problem
     assert "reward_split" in problem
+
+
+def test_observability_report_contains_required_sections(tmp_path):
+    cfg = SimulationConfig(seed=7, agents=8, generations=8, tasks_per_generation=5, log_dir=str(tmp_path))
+    result = SimulationEngine(cfg).run()
+
+    obs = result["report"].get("observability", {})
+    assert "energy" in obs
+    assert "reproduction" in obs
+    assert "contribution" in obs
+    assert "collaboration" in obs
+    assert "diversity" in obs
+    assert "plateau" in obs
+    assert "histogram" in obs["energy"]
+    assert "top_10_richest" in obs["energy"]
+    assert "births_by_generation" in obs["reproduction"]
+    assert "births_by_role" in obs["reproduction"]
+    assert "births_by_lineage" in obs["reproduction"]
+    assert "births_per_agent" in obs["reproduction"]

@@ -522,6 +522,203 @@ class SimulationEngine:
             "plateaued_dimensions": plateaued,
         }
 
+    def _observability_report(self, timeline: List[Dict], all_problems: List[Problem], agents_snapshot: List[Dict], totals: Dict[str, int]) -> Dict:
+        energies = sorted(float(a.get("energy", 0.0)) for a in agents_snapshot)
+
+        def percentile(values: List[float], pct: float) -> float:
+            if not values:
+                return 0.0
+            index = int(round((len(values) - 1) * pct))
+            return values[max(0, min(index, len(values) - 1))]
+
+        def histogram(values: List[float], bins: int = 10) -> List[Dict[str, float]]:
+            if not values:
+                return []
+            low, high = min(values), max(values)
+            width = max(1.0, (high - low) / bins)
+            result = []
+            for i in range(bins):
+                start = low + i * width
+                end = start + width
+                count = sum(1 for v in values if (start <= v < end) or (i == bins - 1 and v <= end))
+                result.append({"start": round(start, 2), "end": round(end, 2), "count": count})
+            return result
+
+        births_per_agent = {aid: int(c.get("offspring", 0)) for aid, c in self.agent_contributions.items() if c.get("offspring", 0)}
+        unique_reproducers = len(births_per_agent)
+        repeat_reproducers = sum(1 for count in births_per_agent.values() if count > 1)
+
+        lineage_counts = Counter()
+        lineage_by_agent = {a.get("agent_id"): a.get("lineage_id") for a in agents_snapshot}
+        for aid, births in births_per_agent.items():
+            lineage_counts[str(lineage_by_agent.get(aid, aid))] += births
+
+        contribution_type_map = {
+            "solve": "final_solve",
+            "verification": "verification",
+            "subtask": "subtask",
+            "plan": "decomposition",
+            "decomposition": "decomposition",
+            "critique": "critique",
+            "artifact": "artifact",
+            "artifact_reuse": "artifact",
+            "integrate": "final_solve",
+        }
+        by_tier: Dict[str, Counter] = defaultdict(Counter)
+        by_domain: Dict[str, Counter] = defaultdict(Counter)
+        for problem in all_problems:
+            for item in problem.contribution_chain:
+                ctype = contribution_type_map.get(item.get("type"))
+                if ctype:
+                    by_tier[str(problem.tier)][ctype] += 1
+                    by_domain[problem.domain][ctype] += 1
+
+        solved = [p for p in all_problems if p.solved]
+        all_solo = [p for p in all_problems if p.resolution_mode == "solo"]
+        all_collab = [p for p in all_problems if p.resolution_mode == "collaborative"]
+
+        collab_share_over_time = []
+        for snap in timeline:
+            gen = snap.get("generation")
+            gen_solved = [p for p in solved if p.generation == gen]
+            collab_share_over_time.append(
+                {
+                    "generation": gen,
+                    "share": round(sum(1 for p in gen_solved if p.resolution_mode == "collaborative") / max(1, len(gen_solved)), 4),
+                }
+            )
+
+        def solve_rate_by_dim(block: List[Dict], field: str, keys: List[str]) -> Dict[str, float]:
+            out = {}
+            for key in keys:
+                solved_count = sum((snap.get(field, {}).get(key) or {}).get("solved", 0) for snap in block)
+                total_count = sum((snap.get(field, {}).get(key) or {}).get("total", 0) for snap in block)
+                out[key] = round(solved_count / max(1, total_count), 4)
+            return out
+
+        def contribution_share(block: List[Dict]) -> Dict[str, float]:
+            totals = Counter()
+            for snap in block:
+                outcomes = snap.get("problem_outcomes") or {}
+                totals["final_solve"] += outcomes.get("solved", 0)
+                totals["verification"] += outcomes.get("verified", 0)
+                totals["subtask"] += outcomes.get("subtasks", 0)
+                totals["decomposition"] += outcomes.get("decompositions", 0)
+                totals["critique"] += outcomes.get("critiques", 0)
+            denom = sum(totals.values())
+            return {k: round(v / max(1, denom), 4) for k, v in totals.items()}
+
+        first_50 = timeline[:50]
+        last_50 = timeline[-50:]
+        first_tier = solve_rate_by_dim(first_50, "problem_success_by_tier", ["1", "2", "3", "4"])
+        last_tier = solve_rate_by_dim(last_50, "problem_success_by_tier", ["1", "2", "3", "4"])
+        first_domain = solve_rate_by_dim(first_50, "problem_success_by_domain", list(DOMAINS))
+        last_domain = solve_rate_by_dim(last_50, "problem_success_by_domain", list(DOMAINS))
+
+        first_collab = round(mean(d["share"] for d in collab_share_over_time[:50]), 4) if collab_share_over_time else 0.0
+        last_collab = round(mean(d["share"] for d in collab_share_over_time[-50:]), 4) if collab_share_over_time else 0.0
+        first_contrib = contribution_share(first_50)
+        last_contrib = contribution_share(last_50)
+
+        plateau_dimensions = []
+        for key, val in last_tier.items():
+            if abs(val - first_tier.get(key, 0.0)) < 0.02:
+                plateau_dimensions.append(f"tier_{key}")
+        for key, val in last_domain.items():
+            if abs(val - first_domain.get(key, 0.0)) < 0.02:
+                plateau_dimensions.append(f"domain_{key}")
+        if abs(last_collab - first_collab) < 0.02:
+            plateau_dimensions.append("collaboration_share")
+        for key, val in last_contrib.items():
+            if abs(val - first_contrib.get(key, 0.0)) < 0.02:
+                plateau_dimensions.append(f"contribution_{key}")
+
+        return {
+            "energy": {
+                "histogram": histogram(energies),
+                "stats": {
+                    "min": round(min(energies), 3) if energies else 0.0,
+                    "median": round(percentile(energies, 0.5), 3),
+                    "mean": round(mean(energies), 3) if energies else 0.0,
+                    "p90": round(percentile(energies, 0.9), 3),
+                    "p99": round(percentile(energies, 0.99), 3),
+                },
+                "top_10_richest": sorted(
+                    [{"agent_id": a.get("agent_id"), "energy": round(float(a.get("energy", 0.0)), 3)} for a in agents_snapshot],
+                    key=lambda x: x["energy"],
+                    reverse=True,
+                )[:10],
+            },
+            "reproduction": {
+                "births_by_generation": {str(s.get("generation")): s.get("births", 0) for s in timeline},
+                "births_by_role": dict(self.role_reproduction_counts),
+                "births_by_lineage": dict(lineage_counts),
+                "births_per_agent": births_per_agent,
+                "unique_reproducers": unique_reproducers,
+                "repeat_reproducers": repeat_reproducers,
+            },
+            "contribution": {
+                "reward_totals_by_type": {
+                    "final_solve": round(totals.get("reward_final_solving", 0.0), 3),
+                    "verification": round(totals.get("reward_verification", 0.0), 3),
+                    "subtask": round(totals.get("reward_subtasks", 0.0), 3),
+                    "decomposition": round(totals.get("reward_decomposition", 0.0), 3),
+                    "critique": round(totals.get("reward_critique", 0.0), 3),
+                    "artifact": round(totals.get("artifact_reuse", 0.0), 3),
+                },
+                "types_by_tier": {k: dict(v) for k, v in by_tier.items()},
+                "types_by_domain": {k: dict(v) for k, v in by_domain.items()},
+            },
+            "collaboration": {
+                "share_by_tier": {
+                    str(t): round(
+                        sum(1 for p in solved if p.tier == t and p.resolution_mode == "collaborative")
+                        / max(1, sum(1 for p in solved if p.tier == t)),
+                        4,
+                    )
+                    for t in [1, 2, 3, 4]
+                },
+                "share_by_domain": {
+                    d: round(
+                        sum(1 for p in solved if p.domain == d and p.resolution_mode == "collaborative")
+                        / max(1, sum(1 for p in solved if p.domain == d)),
+                        4,
+                    )
+                    for d in DOMAINS
+                },
+                "share_over_time": collab_share_over_time,
+                "success_rate_solo": round(sum(1 for p in all_solo if p.solved) / max(1, len(all_solo)), 4),
+                "success_rate_collaborative": round(sum(1 for p in all_collab if p.solved) / max(1, len(all_collab)), 4),
+            },
+            "diversity": {
+                "diversity_over_time": [{"generation": s.get("generation"), "value": round(s.get("diversity_score", 0.0), 4)} for s in timeline],
+                "lineage_count_over_time": [{"generation": s.get("generation"), "value": s.get("lineage_count", 0)} for s in timeline],
+                "top_lineage_share_over_time": [
+                    {
+                        "generation": s.get("generation"),
+                        "value": round((max((s.get("lineages") or {"_": 0}).values()) if s.get("lineages") else 0) / max(1, s.get("population", 0)), 4),
+                    }
+                    for s in timeline
+                ],
+            },
+            "plateau": {
+                "first_50": {
+                    "solve_rate_by_tier": first_tier,
+                    "solve_rate_by_domain": first_domain,
+                    "collaboration_share": first_collab,
+                    "contribution_type_share": first_contrib,
+                },
+                "last_50": {
+                    "solve_rate_by_tier": last_tier,
+                    "solve_rate_by_domain": last_domain,
+                    "collaboration_share": last_collab,
+                    "contribution_type_share": last_contrib,
+                },
+                "plateau_detected": bool(plateau_dimensions),
+                "plateau_dimensions": sorted(set(plateau_dimensions)),
+            },
+        }
+
     def _build_report(self, timeline: List[Dict], all_problems: List[Problem], totals: Dict[str, int], agents_snapshot: List[Dict]) -> Dict:
         solved = sum(1 for p in all_problems if p.solved)
         unsolved = len(all_problems) - solved
@@ -632,6 +829,7 @@ class SimulationEngine:
         ecosystem_diagnostics = self._calculate_ecosystem_diagnostics(timeline, role_contribution_totals)
 
         no_api = self._no_api_capability_report(timeline, all_problems, agents_snapshot)
+        observability = self._observability_report(timeline, all_problems, agents_snapshot, totals)
 
         kind_counts = Counter((p.domain, p.tier) for p in all_problems if p.solved)
         problem_kinds = [
@@ -674,6 +872,7 @@ class SimulationEngine:
                 "immigrants_injected": totals.get("diversity_injected", 0),
             },
             "no_api_capability_ceiling": no_api,
+            "observability": observability,
             "readable_summary": {
                 "what_they_are_solving": problem_kinds,
                 "which_remain_unsolved": unresolved,
@@ -690,6 +889,18 @@ class SimulationEngine:
                         4,
                     ),
                 },
+                "observability": {
+                    "energy": observability.get("energy", {}).get("stats", {}),
+                    "reproduction": {
+                        "unique_reproducers": observability.get("reproduction", {}).get("unique_reproducers", 0),
+                        "repeat_reproducers": observability.get("reproduction", {}).get("repeat_reproducers", 0),
+                    },
+                    "collaboration": {
+                        "solo_success_rate": observability.get("collaboration", {}).get("success_rate_solo", 0.0),
+                        "collaborative_success_rate": observability.get("collaboration", {}).get("success_rate_collaborative", 0.0),
+                    },
+                    "plateau_dimensions": observability.get("plateau", {}).get("plateau_dimensions", []),
+                },
             },
             "warning_flags": warnings,
         }
@@ -704,6 +915,7 @@ class SimulationEngine:
 
     def _generate_markdown_summary(self, result: Dict, report: Dict) -> str:
         ceiling = report.get("no_api_capability_ceiling", {})
+        obs = report.get("observability", {})
         lines = [
             "# Genesis2 Run Summary",
             "",
@@ -725,6 +937,12 @@ class SimulationEngine:
             f"- Unsolved domains: {', '.join(ceiling.get('unsolved_domains', [])) or 'None'}",
             f"- Collaboration share: {ceiling.get('collaboration_effect', {}).get('collaborative_share', 0):.2%}",
             f"- Artifact assisted share: {ceiling.get('artifact_effect', {}).get('artifact_assisted_share', 0):.2%}",
+            "",
+            "## Observability Diagnostics",
+            f"- Energy min/median/mean/p90/p99: {obs.get('energy', {}).get('stats', {}).get('min', 0):.2f} / {obs.get('energy', {}).get('stats', {}).get('median', 0):.2f} / {obs.get('energy', {}).get('stats', {}).get('mean', 0):.2f} / {obs.get('energy', {}).get('stats', {}).get('p90', 0):.2f} / {obs.get('energy', {}).get('stats', {}).get('p99', 0):.2f}",
+            f"- Reproducers unique/repeat: {obs.get('reproduction', {}).get('unique_reproducers', 0)} / {obs.get('reproduction', {}).get('repeat_reproducers', 0)}",
+            f"- Solo vs collaborative success: {obs.get('collaboration', {}).get('success_rate_solo', 0):.2%} vs {obs.get('collaboration', {}).get('success_rate_collaborative', 0):.2%}",
+            f"- Plateau dimensions: {', '.join(obs.get('plateau', {}).get('plateau_dimensions', [])) or 'None'}",
             "",
             "## Sample Problem Prompts",
         ]

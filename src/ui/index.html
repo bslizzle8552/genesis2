@@ -6,457 +6,196 @@
   <title>Genesis2 Simulator</title>
   <style>
     body { font-family: Inter, Arial, sans-serif; margin: 0; background: #0b1020; color: #dbe3f0; }
-    .container { max-width: 1300px; margin: 16px auto 24px; padding: 0 12px; }
+    .container { max-width: 1400px; margin: 16px auto 24px; padding: 0 12px; }
     .card { background: #111a2f; border-radius: 10px; padding: 14px; margin-bottom: 12px; border: 1px solid #223154; }
     h1, h2, h3 { margin: 0 0 10px; }
-    .grid { display: grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); gap: 8px; }
-    .grid3 { display: grid; grid-template-columns: repeat(3, minmax(220px, 1fr)); gap: 12px; }
-    .grid2 { display: grid; grid-template-columns: repeat(2, minmax(240px, 1fr)); gap: 12px; }
-    .metrics { display:grid; grid-template-columns: repeat(5, minmax(160px,1fr)); gap:10px; }
-    .metric { background:#0f1628; border:1px solid #243257; border-radius:8px; padding:8px; }
-    .report-grid { display:grid; grid-template-columns: repeat(2, minmax(280px,1fr)); gap: 10px; }
-    .report-card { background:#0f1628; border:1px solid #243257; border-radius:8px; padding:10px; }
-    .report-card h4 { margin:0 0 8px; font-size:14px; }
-    .kpi { display:flex; justify-content:space-between; gap:8px; padding:4px 0; border-bottom:1px solid #1b2a4e; font-size:13px; }
-    .kpi:last-child { border-bottom:none; }
-    .status-grid { display:grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); gap:8px; }
-    .status-chip { border-radius:8px; border:1px solid #2c4069; background:#0f1628; padding:8px; }
-    .badge { display:inline-block; border-radius:999px; padding:2px 8px; font-size:11px; font-weight:600; }
-    .badge.healthy { background:#123b2d; color:#7ee0b8; }
-    .badge.warning { background:#473617; color:#ffd38a; }
-    .badge.critical { background:#4b1e25; color:#ff9cb1; }
-    .interp { margin-top:8px; color:#b5c5e8; font-size:12px; }
-    details { margin-top: 8px; }
-    summary { cursor: pointer; color: #9fc0ff; font-size: 12px; }
-    label { font-size: 12px; color: #9eb3d8; display: flex; flex-direction: column; gap: 4px; }
-    input, button, select { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #324874; background: #0d1528; color: #dbe3f0; box-sizing: border-box; }
-    button { cursor: pointer; background: #2f6df6; border: none; font-weight: 600; }
-    button:disabled { opacity: .6; cursor: progress; }
-    .tabs { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
-    .tab { width: auto; padding: 8px 12px; background:#1c2a4a; }
+    .grid { display:grid; grid-template-columns: repeat(4,minmax(160px,1fr)); gap:8px; }
+    .grid2 { display:grid; grid-template-columns: repeat(2,minmax(280px,1fr)); gap:10px; }
+    .tabs { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
+    .tab { width:auto; padding:8px 12px; background:#1c2a4a; border:0; border-radius:6px; color:#dbe3f0; cursor:pointer; }
     .tab.active { background:#2f6df6; }
-    .panel { display: none; }
-    .panel.active { display: block; }
-    canvas { width: 100%; height: 180px; background: #0b1222; border-radius: 8px; border: 1px solid #24365e; }
-    table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    th, td { border-bottom: 1px solid #24365e; padding: 6px; text-align: left; }
-    .tiny { font-size:11px; color:#9eb3d8; }
-    pre { margin: 0; white-space: pre-wrap; word-break: break-word; background:#0c1425; border:1px solid #213158; border-radius:8px; padding:10px; }
+    .panel { display:none; }
+    .panel.active { display:block; }
+    label { font-size:12px; color:#9eb3d8; display:flex; flex-direction:column; gap:4px; }
+    input, select, button { width:100%; padding:8px; border-radius:6px; border:1px solid #324874; background:#0d1528; color:#dbe3f0; box-sizing:border-box; }
+    button.primary { background:#2f6df6; border:0; font-weight:700; }
+    table { width:100%; border-collapse: collapse; font-size:12px; }
+    th, td { border-bottom:1px solid #24365e; padding:6px; text-align:left; vertical-align:top; }
+    .kpi { background:#0f1628; border:1px solid #243257; border-radius:8px; padding:8px; }
+    pre { margin:0; white-space:pre-wrap; word-break:break-word; background:#0c1425; border:1px solid #213158; border-radius:8px; padding:10px; }
     .muted { color:#91a6ce; font-size:12px; }
+    .btn-inline { width:auto; padding:4px 8px; font-size:11px; }
   </style>
 </head>
 <body>
-  <div class="container">
-    <h1>Genesis2 Local Control Center</h1>
+<div class="container">
+  <h1>Genesis2 Local Control Center</h1>
 
-    <div class="card">
-      <h2>1) Configure Run</h2>
-      <div class="grid">
-        <label>Preset<select id="preset"></select></label>
-        <label>Random seed<input id="seed" type="number" value="42"></label>
-        <label>Starting agents<input id="agents" type="number" value="10" min="1"></label>
-        <label>Generations<input id="generations" type="number" value="50" min="1"></label>
-        <label>Starting energy<input id="initial_energy" type="number" value="100" min="1"></label>
-        <label>Reproduction threshold<input id="reproduction_threshold" type="number" value="140" min="1"></label>
-        <label>Mutation rate<input id="mutation_rate" type="number" value="0.15" step="0.01" min="0" max="1"></label>
-        <label>Upkeep<input id="upkeep_cost" type="number" value="6" min="0"></label>
-        <label>Problems / generation<input id="tasks_per_generation" type="number" value="8" min="1"></label>
-        <label>Tier 1 mix<input id="tier1" type="number" value="0.35" step="0.01" min="0"></label>
-        <label>Tier 2 mix<input id="tier2" type="number" value="0.30" step="0.01" min="0"></label>
-        <label>Tier 3 mix<input id="tier3" type="number" value="0.20" step="0.01" min="0"></label>
-        <label>Tier 4 mix<input id="tier4" type="number" value="0.15" step="0.01" min="0"></label>
-      </div>
-      <div style="margin-top:10px; display:flex; gap:8px;">
-        <button id="runBtn">2) Run Simulation</button>
-        <div id="status" class="muted" style="align-self:center;">Idle</div>
-      </div>
+  <div class="card">
+    <h2>1) Configure Run</h2>
+    <div class="grid">
+      <label>Preset<select id="preset"></select></label>
+      <label>Random seed<input id="seed" type="number" value="42"></label>
+      <label>Starting agents<input id="agents" type="number" value="10"></label>
+      <label>Generations<input id="generations" type="number" value="50"></label>
+      <label>Starting energy<input id="initial_energy" type="number" value="100"></label>
+      <label>Reproduction threshold<input id="reproduction_threshold" type="number" value="140"></label>
+      <label>Mutation rate<input id="mutation_rate" type="number" step="0.01" value="0.15"></label>
+      <label>Upkeep<input id="upkeep_cost" type="number" value="6"></label>
+      <label>Problems / generation<input id="tasks_per_generation" type="number" value="8"></label>
+      <label>Tier 1 mix<input id="tier1" type="number" step="0.01" value="0.35"></label>
+      <label>Tier 2 mix<input id="tier2" type="number" step="0.01" value="0.30"></label>
+      <label>Tier 3 mix<input id="tier3" type="number" step="0.01" value="0.20"></label>
+      <label>Tier 4 mix<input id="tier4" type="number" step="0.01" value="0.15"></label>
     </div>
-
-    <div class="card">
-      <h2>Live Dashboard</h2>
-      <div class="metrics" id="metrics"></div>
-    </div>
-
-    <div class="card">
-      <h2>Evolution Health Summary</h2>
-      <div class="status-grid" id="healthSummary"></div>
-    </div>
-
-    <div class="tabs">
-      <button class="tab active" data-tab="dashboard">Dashboard</button>
-      <button class="tab" data-tab="report">Run Report</button>
-      <button class="tab" data-tab="inspector">Agent Inspector</button>
-      <button class="tab" data-tab="board">Board Viewer</button>
-      <button class="tab" data-tab="markdown">Markdown Summary</button>
-    </div>
-
-    <div class="panel active" id="dashboard">
-      <div class="grid3">
-        <div class="card"><h3>Population over time</h3><canvas id="populationChart"></canvas><div class="interp" id="populationInterp"></div></div>
-        <div class="card"><h3>Average energy over time</h3><canvas id="energyChart"></canvas><div class="interp" id="energyInterp"></div></div>
-        <div class="card"><h3>Births / deaths over time (raw + trend)</h3><canvas id="birthDeathChart"></canvas><div class="interp" id="birthDeathInterp"></div></div>
-        <div class="card"><h3>Role distribution over time</h3><canvas id="rolesChart"></canvas><div class="interp" id="rolesInterp"></div></div>
-        <div class="card">
-          <h3>Problem success by tier (rolling)</h3>
-          <canvas id="tierChart"></canvas>
-          <div class="interp" id="tierInterp"></div>
-          <table id="tierSummaryTable"></table>
-        </div>
-        <div class="card"><h3>Diversity over time</h3><canvas id="diversityChart"></canvas><div class="interp" id="diversityInterp"></div></div>
-      </div>
-      <div class="card">
-        <h3>Latest Generation Snapshot</h3>
-        <div class="report-grid" id="latestSnapshot"></div>
-        <details>
-          <summary>Raw Generation Snapshot</summary>
-          <pre id="latestSnapshotRaw">No run yet.</pre>
-        </details>
-      </div>
-    </div>
-
-    <div class="panel" id="report">
-      <div class="card">
-        <h3>5) Run Report</h3>
-        <div class="report-grid" id="reportOut"></div>
-        <h3 style="margin-top:10px;">Problem Outcome Reporting</h3>
-        <div id="problemOutcomeBreakdowns"></div>
-        <details>
-          <summary>Raw Run Summary</summary>
-          <pre id="rawRunReport">No report yet.</pre>
-        </details>
-        <details>
-          <summary>Raw Diagnostics</summary>
-          <pre id="rawDiagnostics">No diagnostics yet.</pre>
-        </details>
-      </div>
-    </div>
-
-    <div class="panel" id="inspector">
-      <div class="card">
-        <h3>6) Agent Inspector</h3>
-        <label>Select agent<select id="agentSelect"></select></label>
-        <pre id="agentInspectorOut">No agent selected.</pre>
-      </div>
-    </div>
-
-    <div class="panel" id="board">
-      <div class="card">
-        <h3>7) Board Viewer</h3>
-        <div class="grid">
-          <label>Message type<select id="boardTypeFilter"><option value="">All</option></select></label>
-          <label>Agent<select id="boardAgentFilter"><option value="">All</option></select></label>
-          <label>Problem<input id="boardProblemFilter" placeholder="e.g. G5_P2" /></label>
-          <div></div>
-        </div>
-        <table>
-          <thead><tr><th>Gen</th><th>Type</th><th>Agent</th><th>Problem</th><th>Detail</th></tr></thead>
-          <tbody id="boardTable"></tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="panel" id="markdown">
-      <div class="card"><h3>8) Markdown Summary</h3><pre id="markdownOut">Will be generated after run.</pre></div>
+    <div style="margin-top:10px;display:flex;gap:8px;">
+      <button id="runBtn" class="primary">2) Run Simulation</button>
+      <div id="status" class="muted" style="align-self:center;">Idle</div>
     </div>
   </div>
 
+  <div class="tabs">
+    <button class="tab active" data-tab="dashboard">Dashboard</button>
+    <button class="tab" data-tab="report">Run Report</button>
+    <button class="tab" data-tab="ledger">Problem Explorer</button>
+    <button class="tab" data-tab="board">Board Viewer</button>
+    <button class="tab" data-tab="inspector">Agent Inspector</button>
+    <button class="tab" data-tab="markdown">Markdown</button>
+  </div>
+
+  <div class="panel active" id="dashboard"><div class="card"><div class="grid2" id="metrics"></div></div></div>
+
+  <div class="panel" id="report">
+    <div class="card">
+      <h3>No-API Capability Ceiling</h3>
+      <div class="grid2" id="ceilingSummary"></div>
+      <h3 style="margin-top:12px;">Readable Run Answers</h3>
+      <pre id="readableSummary">No report yet.</pre>
+    </div>
+  </div>
+
+  <div class="panel" id="ledger">
+    <div class="card">
+      <h3>Problem Ledger</h3>
+      <div class="grid">
+        <label>Generation min<input id="fGenMin" type="number" placeholder="1"></label>
+        <label>Generation max<input id="fGenMax" type="number"></label>
+        <label>Tier<select id="fTier"><option value="">All</option><option>1</option><option>2</option><option>3</option><option>4</option></select></label>
+        <label>Domain<select id="fDomain"><option value="">All</option></select></label>
+        <label>Status<select id="fStatus"><option value="">All</option><option>solved</option><option>unsolved</option><option>partial</option></select></label>
+        <label>Resolution<select id="fMode"><option value="">All</option><option>solo</option><option>collaborative</option></select></label>
+        <label>Lineage<input id="fLineage" placeholder="e.g. A1"></label>
+        <label>Agent<input id="fAgent" placeholder="e.g. A4"></label>
+      </div>
+      <table>
+        <thead><tr><th>ID</th><th>Gen</th><th>Tier</th><th>Domain</th><th>Problem Text</th><th>Status</th><th>Resolution</th><th>Time</th><th>Agents</th><th>Contribution Chain</th><th>Reward Split</th><th>Detail</th></tr></thead>
+        <tbody id="ledgerTable"></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h3>Problem Detail View</h3>
+      <pre id="problemDetail">Click "View" in the ledger.</pre>
+    </div>
+  </div>
+
+  <div class="panel" id="board"><div class="card"><h3>Board Messages</h3><pre id="boardOut">No board messages yet.</pre></div></div>
+  <div class="panel" id="inspector"><div class="card"><h3>Agent Inspector</h3><label>Agent<select id="agentSelect"></select></label><pre id="agentOut">No run yet.</pre></div></div>
+  <div class="panel" id="markdown"><div class="card"><h3>Markdown Summary</h3><pre id="markdownOut">No run yet.</pre></div></div>
+</div>
+
 <script>
-const fields = ["seed","agents","generations","initial_energy","reproduction_threshold","mutation_rate","upkeep_cost","tasks_per_generation"];
-const tabs = [...document.querySelectorAll('.tab')];
-const statusEl = document.getElementById('status');
-const runBtn = document.getElementById('runBtn');
-const presetEl = document.getElementById('preset');
-const latestSnapshotEl = document.getElementById('latestSnapshot');
-const latestSnapshotRaw = document.getElementById('latestSnapshotRaw');
-const reportOut = document.getElementById('reportOut');
-const rawRunReport = document.getElementById('rawRunReport');
-const rawDiagnostics = document.getElementById('rawDiagnostics');
-const problemOutcomeBreakdowns = document.getElementById('problemOutcomeBreakdowns');
-const tierSummaryTable = document.getElementById('tierSummaryTable');
-const healthSummaryEl = document.getElementById('healthSummary');
-const markdownOut = document.getElementById('markdownOut');
-const agentSelect = document.getElementById('agentSelect');
-const agentInspectorOut = document.getElementById('agentInspectorOut');
-const boardTable = document.getElementById('boardTable');
-const boardTypeFilter = document.getElementById('boardTypeFilter');
-const boardAgentFilter = document.getElementById('boardAgentFilter');
-const boardProblemFilter = document.getElementById('boardProblemFilter');
-const metrics = document.getElementById('metrics');
+const fields=["seed","agents","generations","initial_energy","reproduction_threshold","mutation_rate","upkeep_cost","tasks_per_generation"];
+let presetMap={}, currentResult=null;
+const v=(id)=>document.getElementById(id).value;
+const n=(id)=>Number(v(id));
+const tabs=[...document.querySelectorAll('.tab')];
+tabs.forEach(t=>t.onclick=()=>{tabs.forEach(x=>x.classList.remove('active'));t.classList.add('active');document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.getElementById(t.dataset.tab).classList.add('active');});
 
-let presetMap = {};
-let currentResult = null;
-const palette = ["#60a5fa", "#34d399", "#f59e0b", "#f87171", "#a78bfa", "#22d3ee"];
+function applyPreset(p){ if(!p) return; fields.forEach(k=>{ if(p[k]!==undefined&&p[k]!==null) document.getElementById(k).value=p[k]; }); const mix=p.tier_mix||{"1":0.35,"2":0.30,"3":0.20,"4":0.15}; [1,2,3,4].forEach(t=>document.getElementById(`tier${t}`).value=mix[String(t)]); }
+async function loadPresets(){ const data=await (await fetch('/api/presets')).json(); const sel=document.getElementById('preset'); sel.innerHTML=''; data.presets.forEach(p=>{presetMap[p.id]=p; const o=document.createElement('option'); o.value=p.id;o.textContent=p.label;sel.appendChild(o);}); if(data.presets[0]){sel.value=data.presets[0].id;applyPreset(data.presets[0]);} sel.onchange=()=>applyPreset(presetMap[sel.value]); }
 
-function val(id){ return Number(document.getElementById(id).value); }
-function unique(arr){ return [...new Set(arr)]; }
-const avg = (arr)=> arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : 0;
-const rolling=(arr,w=5)=>arr.map((_,i)=>avg(arr.slice(Math.max(0,i-w+1), i+1)));
-const pct=(n,d)=> d?`${(100*n/d).toFixed(1)}%`:'0.0%';
-const slope=(arr)=> arr.length<2?0:(arr[arr.length-1]-arr[0])/Math.max(1,arr.length-1);
-
-function applyPreset(p){
-  if(!p) return;
-  fields.forEach((key) => { if(p[key] !== undefined && p[key] !== null) document.getElementById(key).value = p[key]; });
-  const tierMix = p.tier_mix || {"1":0.35,"2":0.30,"3":0.20,"4":0.15};
-  ['1','2','3','4'].forEach((t)=>document.getElementById(`tier${t}`).value=tierMix[t]);
-}
-
-async function loadPresets(){
-  const res = await fetch('/api/presets');
-  const data = await res.json();
-  presetMap = {}; presetEl.innerHTML = '';
-  data.presets.forEach((p) => {
-    presetMap[p.id] = p;
-    const o = document.createElement('option'); o.value = p.id; o.textContent = p.label; presetEl.appendChild(o);
-  });
-  const d = data.presets.find((p) => p.id === 'default.json') || data.presets[0];
-  if(d){ presetEl.value = d.id; applyPreset(d); }
-}
-
-presetEl.addEventListener('change', () => applyPreset(presetMap[presetEl.value]));
-tabs.forEach((tab) => tab.addEventListener('click', () => {
-  tabs.forEach((t) => t.classList.remove('active')); tab.classList.add('active');
-  document.querySelectorAll('.panel').forEach((p) => p.classList.remove('active'));
-  document.getElementById(tab.dataset.tab).classList.add('active');
-}));
-
-function drawLines(canvasId, series){
-  const c = document.getElementById(canvasId); const ctx = c.getContext('2d');
-  const w = c.width = c.clientWidth; const h = c.height = c.clientHeight;
-  ctx.clearRect(0,0,w,h); const pad = 24;
-  const maxLen = Math.max(...series.map(s => s.values.length), 1);
-  const maxVal = Math.max(1, ...series.flatMap(s => s.values));
-  ctx.strokeStyle = '#2c4370'; ctx.strokeRect(pad, pad, w - pad * 2, h - pad * 2);
-  series.forEach((s, si) => {
-    ctx.strokeStyle = s.color || palette[si % palette.length];
-    ctx.lineWidth = s.dashed ? 1.4 : 2.2;
-    ctx.setLineDash(s.dashed ? [5,4] : []);
-    ctx.beginPath();
-    s.values.forEach((v, i) => {
-      const x = pad + (i / Math.max(1, maxLen - 1)) * (w - pad * 2);
-      const y = h - pad - (v / maxVal) * (h - pad * 2);
-      if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
-    });
-    ctx.stroke();
-    ctx.fillStyle = ctx.strokeStyle; ctx.setLineDash([]);
-    ctx.fillText(s.label, pad + 8, pad + 14 + si * 12);
-  });
-}
-
-function interpretPopulation(t){
-  const p=t.map(x=>x.population); const r=(Math.max(...p)-Math.min(...p))/Math.max(1,avg(p));
-  if(slope(p)>0.15) return 'Population is growing with sustained positive trend.';
-  if(slope(p)<-0.15) return 'Population is shrinking; collapse risk is increasing.';
-  return r>0.35 ? 'Population is oscillating but broadly stable.' : 'Population is stable with mild oscillation.';
-}
-function interpretEnergy(t){
-  const e=t.map(x=>x.energy_distribution.mean||0);
-  if(avg(e)<20) return 'Energy economy is critical; agents are near survival limits.';
-  if(slope(e)<-0.2) return 'Average energy is drifting down; efficiency tuning is needed.';
-  return 'Energy looks sustainable for current workload.';
-}
-function interpretRoles(t){
-  const latest=t[t.length-1].roles||{}; const arr=Object.entries(latest).sort((a,b)=>b[1]-a[1]);
-  if(!arr.length) return 'No role signal yet.';
-  const [dom,c]=arr[0], total=Object.values(latest).reduce((a,b)=>a+b,0);
-  return c/Math.max(1,total)>0.6 ? `${dom} role dominates; consider balancing weaker niches.` : 'Roles are reasonably balanced across the population.';
-}
-function interpretDiversity(t){
-  const d=t.map(x=>x.diversity_score||0); const s=slope(d);
-  if(avg(d)<0.35) return 'Diversity is weak and may reduce adaptability.';
-  if(s>0.01) return 'Diversity dropped earlier and is now recovering.';
-  if(s<-0.01) return 'Diversity is declining and should be monitored.';
-  return 'Diversity is moderate and steady.';
-}
-function tierRates(timeline, tier){
-  return timeline.map(t=>{const r=(t.problem_success_by_tier||{})[tier]||{solved:0,total:0}; return r.total?r.solved/r.total:0;});
-}
-
-function renderTierSummary(timeline){
-  const tiers=['1','2','3','4'];
-  const rows = tiers.map((tier)=>{
-    const vals=tierRates(timeline,tier);
-    const overall=avg(vals);
-    const tr=slope(rolling(vals,8));
-    const trend=tr>0.003?'Improving':tr<-0.003?'Declining':'Flat';
-    return `<tr><td>T${tier}</td><td>${(overall*100).toFixed(1)}%</td><td>${trend}</td></tr>`;
-  }).join('');
-  tierSummaryTable.innerHTML = `<thead><tr><th>Tier</th><th>Overall Success</th><th>Trend</th></tr></thead><tbody>${rows}</tbody>`;
-  const o=tiers.map(t=>({tier:t,rate:avg(tierRates(timeline,t))})).sort((a,b)=>a.rate-b.rate);
-  document.getElementById('tierInterp').textContent = `Tier ${o[0].tier} remains hardest (${(o[0].rate*100).toFixed(1)}% avg). Tier ${o[o.length-1].tier} is easiest.`;
-}
-
-function mkCard(title, rows){
-  return `<div class="report-card"><h4>${title}</h4>${rows.map(r=>`<div class="kpi"><span>${r[0]}</span><strong>${r[1]}</strong></div>`).join('')}</div>`;
-}
-
-function renderHealthSummary(result, timeline){
-  const latest=timeline[timeline.length-1];
-  const pop=latest.population; const e=latest.energy_distribution.mean||0; const d=latest.diversity_score||0;
-  const roles=latest.roles||{}; const roleDom=Math.max(0,...Object.values(roles))/Math.max(1,pop);
-  const verifyRate=result.totals.verified/Math.max(1,result.totals.solved);
-  const artRate=result.totals.artifact_reuse/Math.max(1,result.totals.artifact_created);
-  const items=[
-    ['Population Health', pop>5?'healthy':pop>2?'warning':'critical', pop>5?'Population is viable with enough active agents.':'Population is thin and vulnerable to shocks.'],
-    ['Economy Balance', e>35?'healthy':e>20?'warning':'critical', e>35?'Energy economy supports continued exploration.':'Low mean energy suggests excessive upkeep or task pressure.'],
-    ['Diversity Health', d>0.55?'healthy':d>0.35?'warning':'critical', d>0.55?'Lineages and strategies remain diverse.':'Low diversity raises convergence risk.'],
-    ['Wrapper Dominance Risk', roleDom<0.55?'healthy':roleDom<0.7?'warning':'critical', roleDom<0.55?'No single role controls the run.':'One role dominates strongly, reducing flexibility.'],
-    ['Passive Survival Risk', slope(timeline.map(x=>x.births-x.deaths))>-0.1?'healthy':'warning', 'Birth/death balance indicates whether survival is active or fragile.'],
-    ['Verification Niche', verifyRate>0.35?'healthy':verifyRate>0.15?'warning':'critical', verifyRate>0.35?'Verification contributes meaningful corrections.':'Verification niche appears weak.'],
-    ['Artifact Relevance', artRate>0.5?'healthy':artRate>0.2?'warning':'critical', artRate>0.5?'Artifacts are reused and carrying value.':'Artifacts are rarely reused; quality may be low.'],
+function renderDashboard(r){
+  const t=r.timeline||[]; const latest=t[t.length-1]||{}; const noApi=r.report?.no_api_capability_ceiling||{};
+  const rows=[
+    ["Final population", r.final_population], ["Total problems", (r.problems||[]).length], ["Solved", r.report?.problems?.solved||0], ["Unsolved", r.report?.problems?.unsolved||0],
+    ["No-API plateau", String(noApi.plateau_detected)], ["Improved dimensions", (noApi.improved_dimensions||[]).join(', ')||'none'], ["Plateaued dimensions", (noApi.plateaued_dimensions||[]).join(', ')||'none'],
+    ["Last generation", latest.generation||0], ["Avg energy", (latest.energy_distribution?.mean||0).toFixed(2)], ["Collab share", ((noApi.collaboration_effect?.collaborative_share||0)*100).toFixed(1)+'%']
   ];
-  healthSummaryEl.innerHTML = items.map(([name,state,msg])=>`<div class="status-chip"><div><strong>${name}</strong> <span class="badge ${state}">${state.toUpperCase()}</span></div><div class="tiny">${msg}</div></div>`).join('');
+  document.getElementById('metrics').innerHTML=rows.map(([k,val])=>`<div class="kpi"><div class="muted">${k}</div><div><strong>${val}</strong></div></div>`).join('');
 }
 
-function renderDashboard(result){
-  const timeline = result.timeline || []; if(!timeline.length) return;
-  const latest = timeline[timeline.length - 1];
-  const tops = [...(result.agents || [])].sort((a,b)=>b.energy-a.energy).slice(0,3).map(a=>`${a.agent_id}(${a.energy.toFixed(1)})`).join(', ');
-  const roleEntries=Object.entries(latest.roles||{}).sort((a,b)=>b[1]-a[1]);
-
-  const mk=(l,v)=>`<div class="metric"><div class="muted">${l}</div><div>${v}</div></div>`;
-  metrics.innerHTML = [
-    mk('Current generation', latest.generation), mk('Population size', latest.population),
-    mk('Births / deaths', `${latest.births} / ${latest.deaths}`), mk('Avg energy', (latest.energy_distribution.mean||0).toFixed(2)),
-    mk('Dominant role', roleEntries[0]?.[0] || '-'), mk('Diversity score', latest.diversity_score || 0),
-    mk('Top agents', tops || '-'), mk('Total solves/verifs/subtasks', `${result.totals.solved}/${result.totals.verified}/${result.totals.subtasks}`),
-  ].join('');
-
-  const divStatus=(latest.diversity_score||0)>0.55?'Strong':(latest.diversity_score||0)>0.35?'Moderate':'Falling';
-  latestSnapshotEl.innerHTML=[
-    ['Generation',latest.generation],['Population',latest.population],['Births this generation',latest.births],['Deaths this generation',latest.deaths],
-    ['Avg energy',(latest.energy_distribution.mean||0).toFixed(1)],['Dominant role',roleEntries[0]?.[0]||'-'],['Diversity status',divStatus]
-  ].map(([k,v])=>`<div class="report-card"><h4>${k}</h4><div>${v}</div></div>`).join('');
-  latestSnapshotRaw.textContent = JSON.stringify(latest, null, 2);
-
-  drawLines('populationChart', [{label:'Population', values: timeline.map(t=>t.population)}]);
-  drawLines('energyChart', [{label:'Avg energy', values: timeline.map(t=>t.energy_distribution.mean||0)}]);
-  const births=timeline.map(t=>t.births), deaths=timeline.map(t=>t.deaths);
-  drawLines('birthDeathChart', [
-    {label:'Births (raw)', values: births, color:'#22c55e', dashed:true}, {label:'Deaths (raw)', values: deaths, color:'#ef4444', dashed:true},
-    {label:'Birth trend', values: rolling(births,6), color:'#4ade80'}, {label:'Death trend', values: rolling(deaths,6), color:'#fb7185'}
-  ]);
-  const roleKeys = [...new Set(timeline.flatMap(t => Object.keys(t.roles || {})))];
-  drawLines('rolesChart', roleKeys.map((r, i)=>({label:r, values: timeline.map(t => (t.roles||{})[r] || 0), color:palette[i%palette.length]})));
-  drawLines('tierChart', ['1','2','3','4'].map((tier,i)=>({label:`T${tier} rolling success`, values: rolling(tierRates(timeline,tier),8), color:palette[i%palette.length]})));
-  drawLines('diversityChart', [{label:'Diversity', values: timeline.map(t => t.diversity_score || 0), color:'#a78bfa'}]);
-
-  document.getElementById('populationInterp').textContent = interpretPopulation(timeline);
-  document.getElementById('energyInterp').textContent = interpretEnergy(timeline);
-  document.getElementById('birthDeathInterp').textContent = slope(rolling(births.map((b,i)=>b-deaths[i]),6))<0 ? 'Deaths are outpacing births recently; net contraction risk.' : 'Birth/death trend is balanced or positive.';
-  document.getElementById('rolesInterp').textContent = interpretRoles(timeline);
-  document.getElementById('diversityInterp').textContent = interpretDiversity(timeline);
-  renderTierSummary(timeline);
-  renderHealthSummary(result, timeline);
-}
-
-function buildProblemBreakdowns(result){
-  const problems=result.problems||[]; const board=result.board_messages||[];
-  const solveGen={}; board.filter(m=>m.message_type==='solve').forEach(m=>solveGen[m.problem_id]=m.generation);
-  const createGen=(pid)=>Number((pid.match(/^G(\d+)_/)||[])[1]||0);
-  const avgSolveGen=avg(Object.entries(solveGen).map(([pid,g])=>g-createGen(pid)));
-  const subtasksPerSolved=result.totals.subtasks/Math.max(1,result.totals.solved);
-  const catches=board.filter(m=>m.message_type==='catch_incorrect').length;
-  const solvedAfterVerification=(problems.filter(p=>p.solved&&p.verified).length);
-  const partial=problems.filter(p=>!p.solved && p.owner_id).length;
-
-  const head=[["Total problems",problems.length],["Solved",problems.filter(p=>p.solved).length],["Unsolved",problems.filter(p=>!p.solved).length],["Partially solved",partial],["Incorrect then corrected",catches],["Solved with subtasks",result.totals.solved],["Solved after verification",solvedAfterVerification],["Average time to solve",`${avgSolveGen.toFixed(2)} generations`]];
-
-  const by=(key)=>{
-    const map={};
-    problems.forEach(p=>{const k=String(p[key]??'-'); map[k]=map[k]||{total:0,solved:0,verified:0}; map[k].total++; if(p.solved) map[k].solved++; if(p.verified) map[k].verified++;});
-    return map;
-  };
-  const byLineage={};
-  (result.agents||[]).forEach(a=>byLineage[a.agent_id]=a.lineage_id);
-  const byWorkflow={};
-  (result.agents||[]).forEach(a=>{const wf=Object.entries(a.workflow||{}).sort((x,y)=>y[1]-x[1])[0]?.[0]||'mixed'; byWorkflow[a.agent_id]=wf;});
-  const enrichOwner=(mapper)=>{
-    const map={};
-    problems.forEach(p=>{const k=mapper[p.owner_id]||'unowned'; map[k]=map[k]||{total:0,solved:0}; map[k].total++; if(p.solved) map[k].solved++;});
-    return map;
-  };
-  const table=(title,m)=>`<div class="report-card"><h4>${title}</h4><table><thead><tr><th>Group</th><th>Solved</th><th>Total</th><th>Success</th></tr></thead><tbody>${Object.entries(m).map(([k,v])=>`<tr><td>${k}</td><td>${v.solved}</td><td>${v.total}</td><td>${pct(v.solved,v.total)}</td></tr>`).join('')}</tbody></table></div>`;
-
-  problemOutcomeBreakdowns.innerHTML = `<div class="report-grid">${mkCard('Problem Outcomes', head)}${table('By Tier', by('tier'))}${table('By Domain', by('domain'))}${table('By Lineage', enrichOwner(byLineage))}${table('By Workflow Type', enrichOwner(byWorkflow))}</div>`;
-}
-
-function renderReport(result){
-  const report = result.report || {}; const timeline=result.timeline||[];
-  const latest=timeline[timeline.length-1]||{}; const pop=latest.population||0; const energy=latest.energy_distribution?.mean||0;
-  const cards = [
-    mkCard('Overall Run Summary', [['Generations', timeline.length], ['Final population', result.final_population], ['Problems solved', report.problems?.solved||0], ['Problems unsolved', report.problems?.unsolved||0]]),
-    mkCard('Population Health', [['Current population', pop], ['Trend', interpretPopulation(timeline)], ['Births total', timeline.reduce((a,t)=>a+t.births,0)], ['Deaths total', timeline.reduce((a,t)=>a+t.deaths,0)]]),
-    mkCard('Diversity and Evolution', [['Latest diversity', latest.diversity_score||0], ['Interpretation', interpretDiversity(timeline)], ['Lineages alive', Object.keys(result.lineages||{}).length], ['Mutation rate', result.config?.mutation_rate ?? '-']]),
-    mkCard('Role Emergence', Object.entries(latest.roles||{}).map(([k,v])=>[k,v])),
-    mkCard('Problem Outcomes', [['Solved', report.problems?.solved||0], ['Unsolved', report.problems?.unsolved||0], ['Verification rate', pct(result.totals.verified, Math.max(1,result.totals.solved))], ['Subtasks', result.totals.subtasks||0]]),
-    mkCard('Verification Impact', [['Total verifications', report.verification_summary?.total_verifications||0], ['Verification per solve', (report.verification_summary?.verification_rate||0).toFixed(3)], ['Solved after verification', (result.problems||[]).filter(p=>p.solved&&p.verified).length], ['Notes', 'Higher rate means stronger validator niche']]),
-    mkCard('Artifact Impact', [['Artifacts created', report.artifact_reuse_summary?.created||0], ['Artifacts reused', report.artifact_reuse_summary?.reused||0], ['Reuse rate', (100*(report.artifact_reuse_summary?.reuse_rate||0)).toFixed(1)+'%'], ['Notes', 'Reuse indicates accumulated knowledge']]),
-    mkCard('Top Agents', (report.top_agents||[]).slice(0,5).map(a=>[`${a.agent_id} (L${a.lineage_id})`, `score ${a.score}, E=${a.energy}`])),
-    mkCard('Top Lineages', (report.top_lineages||[]).slice(0,5).map(l=>[`${l.lineage_id}`, `${l.population} pop / ${l.solves} solves`])),
-    mkCard('Warning Flags', (report.warning_flags||['None']).map(w=>['Flag', w])),
-    mkCard('Recommended Next Tuning Actions', [
-      ['If population shrinking', 'Raise initial energy or lower upkeep slightly.'],
-      ['If diversity low', 'Increase mutation rate modestly or reduce dominant role rewards.'],
-      ['If T4 weak', 'Increase verifier incentives and decomposition specialization.'],
-      ['If artifacts unused', 'Raise artifact reuse reward or quality threshold.'],
-    ]),
+function renderReport(r){
+  const c=r.report?.no_api_capability_ceiling||{};
+  const cards=[
+    ["Success by tier over time", JSON.stringify(c.tier_success_over_time||{}, null, 2)],
+    ["Success by domain over time", JSON.stringify(c.domain_success_over_time||{}, null, 2)],
+    ["First-50 vs Last-50", JSON.stringify(c.first_50_vs_last_50||{}, null, 2)],
+    ["Founder baseline vs evolved", JSON.stringify(c.founder_vs_evolved||{}, null, 2)],
+    ["Unsolved tiers/domains", `tiers=${(c.unsolved_tiers||[]).join(', ')||'none'} | domains=${(c.unsolved_domains||[]).join(', ')||'none'}`],
+    ["Collaboration/artifact impact", JSON.stringify({collaboration:c.collaboration_effect, artifacts:c.artifact_effect}, null, 2)],
   ];
-  reportOut.innerHTML = cards.join('');
-  rawRunReport.textContent = JSON.stringify(report, null, 2);
-  rawDiagnostics.textContent = JSON.stringify({ totals: result.totals, latest, config: result.config }, null, 2);
-  buildProblemBreakdowns(result);
+  document.getElementById('ceilingSummary').innerHTML=cards.map(([k,val])=>`<div class="kpi"><div class="muted">${k}</div><pre>${val}</pre></div>`).join('');
+  document.getElementById('readableSummary').textContent=JSON.stringify(r.report?.readable_summary||{}, null, 2);
 }
 
-function renderInspector(result){
-  const agents = [...(result.agents || [])].sort((a,b) => b.energy - a.energy);
-  agentSelect.innerHTML = '';
-  agents.forEach((a)=>{ const o=document.createElement('option'); o.value=a.agent_id; o.textContent=`${a.agent_id} | role=${a.role} | energy=${a.energy}`; agentSelect.appendChild(o); });
-  if(agents[0]){ agentSelect.value = agents[0].agent_id; showAgent(); }
-}
-function showAgent(){
+function refreshLedger(){
   if(!currentResult) return;
-  const agent = (currentResult.agents || []).find((a) => a.agent_id === agentSelect.value); if(!agent) return;
-  agentInspectorOut.textContent = JSON.stringify({ agent_id: agent.agent_id, genome: agent.genome, workflow: agent.workflow, energy_history: agent.energy_history, contributions: agent.contributions, offspring: agent.offspring, artifacts: agent.artifacts }, null, 2);
-}
-function renderBoard(result){
-  const msgs = result.board_messages || [];
-  const types = unique(msgs.map(m => m.message_type));
-  const agents = unique(msgs.map(m => m.agent_id).filter(Boolean));
-  boardTypeFilter.innerHTML = '<option value="">All</option>' + types.map(t => `<option>${t}</option>`).join('');
-  boardAgentFilter.innerHTML = '<option value="">All</option>' + agents.map(a => `<option>${a}</option>`).join('');
-  function refresh(){
-    const t = boardTypeFilter.value; const a = boardAgentFilter.value; const p = boardProblemFilter.value.trim();
-    const filtered = msgs.filter((m) => (!t || m.message_type === t) && (!a || m.agent_id === a) && (!p || (m.problem_id || '').includes(p)));
-    boardTable.innerHTML = filtered.slice(-250).map((m) => `<tr><td>${m.generation}</td><td>${m.message_type}</td><td>${m.agent_id || '-'}</td><td>${m.problem_id || '-'}</td><td>${m.detail}</td></tr>`).join('');
-  }
-  boardTypeFilter.onchange = refresh; boardAgentFilter.onchange = refresh; boardProblemFilter.oninput = refresh; refresh();
-}
-agentSelect.addEventListener('change', showAgent);
-function renderAll(result){
-  currentResult = result;
-  renderDashboard(result); renderReport(result); renderInspector(result); renderBoard(result);
-  markdownOut.textContent = `Generated: ${result.markdown_summary_path || 'n/a'}
+  const problems=currentResult.problems||[];
+  const agentsById={}; (currentResult.agents||[]).forEach(a=>agentsById[a.agent_id]=a);
+  const domains=[...new Set(problems.map(p=>p.domain))];
+  const dSel=document.getElementById('fDomain'); if(!dSel.dataset.init){dSel.innerHTML='<option value="">All</option>'+domains.map(d=>`<option>${d}</option>`).join(''); dSel.dataset.init='1';}
 
-A markdown run summary file is written after each run.`;
+  const minGen=n('fGenMin')||-Infinity, maxGen=n('fGenMax')||Infinity;
+  const tier=v('fTier'), domain=v('fDomain'), status=v('fStatus'), mode=v('fMode');
+  const lineage=v('fLineage').trim(), agent=v('fAgent').trim();
+
+  const filt=problems.filter(p=>
+    p.generation>=minGen && p.generation<=maxGen && (!tier||String(p.tier)===tier) && (!domain||p.domain===domain) && (!status||p.status===status) && (!mode||p.resolution_mode===mode)
+    && (!agent||p.agents_involved.includes(agent)||p.owner_id===agent)
+    && (!lineage||p.agents_involved.some(aid=>String(agentsById[aid]?.lineage_id||'').includes(lineage))||String(agentsById[p.owner_id]?.lineage_id||'').includes(lineage))
+  );
+
+  document.getElementById('ledgerTable').innerHTML=filt.map(p=>`<tr>
+    <td>${p.problem_id}</td><td>${p.generation}</td><td>${p.tier}</td><td>${p.domain}</td><td>${p.prompt_text}</td><td>${p.status}</td><td>${p.resolution_mode}</td>
+    <td>${p.time_to_solve===null?'-':p.time_to_solve}</td><td>${p.agents_involved.join(', ')||'-'}</td>
+    <td>${(p.contribution_chain||[]).map(c=>`${c.agent_id}:${c.type}`).join(' → ')||'-'}</td>
+    <td>${Object.entries(p.reward_split||{}).map(([a,x])=>`${a}:${x}`).join(', ')||'-'}</td>
+    <td><button class="btn-inline" onclick="showProblem('${p.problem_id}')">View</button></td>
+  </tr>`).join('');
 }
+
+window.showProblem=(pid)=>{
+  if(!currentResult) return;
+  const p=(currentResult.problems||[]).find(x=>x.problem_id===pid); if(!p) return;
+  const msgs=(currentResult.board_messages||[]).filter(m=>m.problem_id===pid);
+  document.getElementById('problemDetail').textContent=JSON.stringify({
+    problem_id:p.problem_id, original_problem_text:p.prompt_text, final_outcome:p.final_outcome, payout_attribution:p.payout_attribution,
+    agents_involved:p.agents_involved, contribution_chain:p.contribution_chain, contributions_used:(p.contribution_chain||[]).map(c=>c.type),
+    related_board_messages:msgs,
+  }, null, 2);
+};
+
+function renderBoard(r){ document.getElementById('boardOut').textContent=JSON.stringify(r.board_messages||[], null, 2); }
+function renderAgents(r){ const sel=document.getElementById('agentSelect'); sel.innerHTML=''; (r.agents||[]).forEach(a=>{const o=document.createElement('option');o.value=a.agent_id;o.textContent=a.agent_id;sel.appendChild(o)}); sel.onchange=()=>{const a=(r.agents||[]).find(x=>x.agent_id===sel.value); document.getElementById('agentOut').textContent=JSON.stringify(a||{},null,2);}; if((r.agents||[])[0]){sel.value=r.agents[0].agent_id; sel.onchange();} }
+function renderAll(r){ currentResult=r; renderDashboard(r); renderReport(r); renderBoard(r); renderAgents(r); document.getElementById('markdownOut').textContent=`Summary file: ${r.markdown_summary_path}`; refreshLedger(); }
+
 async function startRun(){
-  const payload = { preset: presetEl.value, seed: val('seed'), agents: val('agents'), generations: val('generations'), initial_energy: val('initial_energy'), reproduction_threshold: val('reproduction_threshold'), mutation_rate: val('mutation_rate'), upkeep_cost: val('upkeep_cost'), tasks_per_generation: val('tasks_per_generation'), tier_mix: {"1": val('tier1'),"2": val('tier2'),"3": val('tier3'),"4": val('tier4')} };
-  const response = await fetch('/api/run', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(payload) });
-  const data = await response.json(); if(data.error) throw new Error(data.error);
+  const payload={ preset:v('preset'), seed:n('seed'), agents:n('agents'), generations:n('generations'), initial_energy:n('initial_energy'), reproduction_threshold:n('reproduction_threshold'), mutation_rate:n('mutation_rate'), upkeep_cost:n('upkeep_cost'), tasks_per_generation:n('tasks_per_generation'), tier_mix:{"1":n('tier1'),"2":n('tier2'),"3":n('tier3'),"4":n('tier4')} };
+  const res=await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  const data=await res.json(); if(data.error) throw new Error(data.error);
 }
-async function pollState(){
-  const res = await fetch('/api/state'); const data = await res.json();
-  if(data.status === 'running'){ const p = data.progress || {}; statusEl.textContent = `Running generation ${p.generation || 0} | population ${p.population || 0} | births ${p.births || 0} | deaths ${p.deaths || 0}`; }
-  if(data.status === 'done' && data.result){ statusEl.textContent = `Done. Final population ${data.result.final_population}. Summary: ${data.result.summary_path}`; renderAll(data.result); runBtn.disabled = false; return true; }
-  if(data.status === 'error'){ statusEl.textContent = `Error: ${data.error}`; runBtn.disabled = false; return true; }
+async function poll(){
+  const data=await (await fetch('/api/state')).json();
+  const s=document.getElementById('status');
+  if(data.status==='running'){ const p=data.progress||{}; s.textContent=`Running gen ${p.generation||0}, pop ${p.population||0}`; return false; }
+  if(data.status==='done'){ s.textContent=`Done. ${data.result.summary_path}`; renderAll(data.result); document.getElementById('runBtn').disabled=false; return true; }
+  if(data.status==='error'){ s.textContent=`Error: ${data.error}`; document.getElementById('runBtn').disabled=false; return true; }
   return false;
 }
-runBtn.addEventListener('click', async () => {
-  try{ runBtn.disabled = true; statusEl.textContent = 'Launching run...'; await startRun(); let done = false; while(!done){ await new Promise((r) => setTimeout(r, 800)); done = await pollState(); } }
-  catch(err){ statusEl.textContent = `Run failed: ${err.message}`; runBtn.disabled = false; }
-});
-loadPresets().catch((err) => statusEl.textContent = `Preset load failed: ${err.message}`);
+
+document.getElementById('runBtn').onclick=async()=>{ try{document.getElementById('runBtn').disabled=true; await startRun(); let done=false; while(!done){ await new Promise(r=>setTimeout(r,900)); done=await poll(); }}catch(e){document.getElementById('status').textContent=e.message; document.getElementById('runBtn').disabled=false;}};
+['fGenMin','fGenMax','fTier','fDomain','fStatus','fMode','fLineage','fAgent'].forEach(id=>document.getElementById(id).addEventListener('input', refreshLedger));
+loadPresets();
 </script>
 </body>
 </html>

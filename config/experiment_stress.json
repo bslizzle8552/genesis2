@@ -1,0 +1,9 @@
+{
+  "seed": 99,
+  "agents": 20,
+  "generations": 80,
+  "initial_energy": 100,
+  "upkeep_cost": 6,
+  "tasks_per_generation": 14,
+  "log_dir": "runs"
+}

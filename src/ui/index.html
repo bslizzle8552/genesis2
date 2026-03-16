@@ -23,11 +23,7 @@
       <h2>Simulation Setup</h2>
       <div class="grid">
         <label>Preset
-          <select id="preset">
-            <option value="default">Default (10 agents / 50 generations)</option>
-            <option value="fast">Fast (8 agents / 20 generations)</option>
-            <option value="stress">Stress (20 agents / 80 generations)</option>
-          </select>
+          <select id="preset"></select>
         </label>
         <label>Seed <input id="seed" type="number" value="42"></label>
         <label>Agents <input id="agents" type="number" value="10"></label>
@@ -64,16 +60,46 @@ const summary = document.getElementById('summary');
 const timeline = document.getElementById('timeline');
 const agentsOut = document.getElementById('agentsOut');
 const reportsOut = document.getElementById('reportsOut');
+let presetMap = {};
 
-preset.addEventListener('change', () => {
-  if (preset.value === 'fast') { agents.value = 8; generations.value = 20; }
-  if (preset.value === 'default') { agents.value = 10; generations.value = 50; }
-  if (preset.value === 'stress') { agents.value = 20; generations.value = 80; }
+function applyPreset(p) {
+  if (!p) return;
+  if (typeof p.seed === 'number') seed.value = p.seed;
+  if (typeof p.agents === 'number') agents.value = p.agents;
+  if (typeof p.generations === 'number') generations.value = p.generations;
+}
+
+async function loadPresets() {
+  const res = await fetch('/api/presets');
+  const data = await res.json();
+  presetMap = {};
+  preset.innerHTML = '';
+
+  data.presets.forEach((p) => {
+    presetMap[p.id] = p;
+    const option = document.createElement('option');
+    option.value = p.id;
+    option.textContent = p.label;
+    preset.appendChild(option);
+  });
+
+  if (data.presets.length > 0) {
+    const defaultPreset = data.presets.find((p) => p.id === 'default.json') || data.presets[0];
+    preset.value = defaultPreset.id;
+    applyPreset(defaultPreset);
+  }
+}
+
+preset.addEventListener('change', () => applyPreset(presetMap[preset.value]));
+
+loadPresets().catch(() => {
+  summary.textContent = 'Could not load presets';
 });
 
 document.getElementById('runBtn').addEventListener('click', async () => {
   summary.textContent = 'Running...';
   const payload = {
+    preset: preset.value,
     seed: Number(seed.value),
     agents: Number(agents.value),
     generations: Number(generations.value)
@@ -86,6 +112,11 @@ document.getElementById('runBtn').addEventListener('click', async () => {
   });
 
   const data = await res.json();
+  if (data.error) {
+    summary.textContent = `Error: ${data.error}`;
+    return;
+  }
+
   const result = data.result;
   summary.textContent = `Done | Final population: ${result.final_population} | log: ${result.summary_path}`;
   timeline.textContent = JSON.stringify(result.timeline.slice(-10), null, 2);

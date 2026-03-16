@@ -1,3 +1,4 @@
+from pathlib import Path
 from src.engine.simulation import SimulationConfig, SimulationEngine
 
 
@@ -16,3 +17,13 @@ def test_agents_have_genomes_after_run(tmp_path):
     for agent in result["agents"]:
         assert "genome" in agent
         assert "specialization" in agent["genome"]
+
+
+def test_simulation_outputs_report_and_markdown(tmp_path):
+    cfg = SimulationConfig(seed=3, agents=6, generations=4, tasks_per_generation=4, log_dir=str(tmp_path))
+    result = SimulationEngine(cfg).run()
+
+    assert "report" in result
+    assert "warning_flags" in result["report"]
+    assert Path(result["markdown_summary_path"]).exists()
+    assert len(result["board_messages"]) >= 1

@@ -673,6 +673,17 @@ class SimulationEngine:
             "report": report,
             "lineages": lineage_members,
             "config": asdict(self.config),
+            "problems": [
+                {
+                    "problem_id": p.problem_id,
+                    "domain": p.domain,
+                    "tier": p.tier,
+                    "solved": p.solved,
+                    "verified": p.verified,
+                    "owner_id": p.owner_id,
+                }
+                for p in all_problems
+            ],
         }
 
         markdown_path = Path(summary_path).with_name("run_summary.md")

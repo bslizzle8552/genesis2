@@ -19,3 +19,19 @@ def test_config_from_request_overrides_values():
     cfg = config_from_request({"preset": "experiment_fast.json", "agents": 11, "generations": 13})
     assert cfg.agents == 11
     assert cfg.generations == 13
+
+
+def test_config_from_request_supports_extended_fields():
+    cfg = config_from_request({
+        "preset": "experiment_fast.json",
+        "initial_energy": 120,
+        "reproduction_threshold": 150,
+        "mutation_rate": 0.22,
+        "upkeep_cost": 4,
+        "tier_mix": {"1": 0.1, "2": 0.2, "3": 0.3, "4": 0.4},
+    })
+    assert cfg.initial_energy == 120
+    assert cfg.reproduction_threshold == 150
+    assert cfg.mutation_rate == 0.22
+    assert cfg.upkeep_cost == 4
+    assert cfg.tier_mix["4"] == 0.4

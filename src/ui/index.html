@@ -5,128 +5,367 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Genesis2 Simulator</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 0; background: #111827; color: #e5e7eb; }
-    .container { max-width: 1000px; margin: 24px auto; padding: 0 16px; }
-    .card { background: #1f2937; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
-    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
-    input, button, select { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #374151; background: #0f172a; color: #e5e7eb; }
-    button { cursor: pointer; background: #2563eb; border: none; }
-    h1, h2 { margin-top: 0; }
-    pre { background: #0b1220; padding: 12px; border-radius: 6px; overflow-x: auto; }
+    body { font-family: Inter, Arial, sans-serif; margin: 0; background: #0b1020; color: #dbe3f0; }
+    .container { max-width: 1300px; margin: 16px auto 24px; padding: 0 12px; }
+    .card { background: #111a2f; border-radius: 10px; padding: 14px; margin-bottom: 12px; border: 1px solid #223154; }
+    h1, h2, h3 { margin: 0 0 10px; }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); gap: 8px; }
+    .grid3 { display: grid; grid-template-columns: repeat(3, minmax(240px, 1fr)); gap: 12px; }
+    .metrics { display:grid; grid-template-columns: repeat(5, minmax(160px,1fr)); gap:10px; }
+    .metric { background:#0f1628; border:1px solid #243257; border-radius:8px; padding:8px; }
+    .chart-meta { display:flex; justify-content:space-between; align-items:flex-start; gap:8px; margin:6px 0 8px; }
+    .legend { display:flex; flex-wrap:wrap; gap:8px; font-size:11px; color:#93aad1; }
+    .legend-item { display:inline-flex; align-items:center; gap:4px; }
+    .legend-color { width:10px; height:10px; border-radius:2px; display:inline-block; }
+    .scale-note { font-size:11px; color:#93aad1; text-align:right; }
+    label { font-size: 12px; color: #9eb3d8; display: flex; flex-direction: column; gap: 4px; }
+    input, button, select { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #324874; background: #0d1528; color: #dbe3f0; box-sizing: border-box; }
+    button { cursor: pointer; background: #2f6df6; border: none; font-weight: 600; }
+    button:disabled { opacity: .6; cursor: progress; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+    .tab { width: auto; padding: 8px 12px; background:#1c2a4a; }
+    .tab.active { background:#2f6df6; }
+    .panel { display: none; }
+    .panel.active { display: block; }
+    canvas { width: 100%; height: 220px; background: #0b1222; border-radius: 8px; border: 1px solid #24365e; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { border-bottom: 1px solid #24365e; padding: 6px; text-align: left; }
+    pre { margin: 0; white-space: pre-wrap; word-break: break-word; background:#0c1425; border:1px solid #213158; border-radius:8px; padding:10px; }
+    .muted { color:#91a6ce; font-size:12px; }
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>Genesis2 Evolution Simulator</h1>
+    <h1>Genesis2 Local Control Center</h1>
 
     <div class="card">
-      <h2>Simulation Setup</h2>
+      <h2>1) Configure Run</h2>
       <div class="grid">
-        <label>Preset
-          <select id="preset"></select>
-        </label>
-        <label>Seed <input id="seed" type="number" value="42"></label>
-        <label>Agents <input id="agents" type="number" value="10"></label>
-        <label>Generations <input id="generations" type="number" value="50"></label>
+        <label>Preset<select id="preset"></select></label>
+        <label>Random seed<input id="seed" type="number" value="42"></label>
+        <label>Starting agents<input id="agents" type="number" value="10" min="1"></label>
+        <label>Generations<input id="generations" type="number" value="50" min="1"></label>
+        <label>Starting energy<input id="initial_energy" type="number" value="100" min="1"></label>
+        <label>Reproduction threshold<input id="reproduction_threshold" type="number" value="140" min="1"></label>
+        <label>Mutation rate<input id="mutation_rate" type="number" value="0.15" step="0.01" min="0" max="1"></label>
+        <label>Upkeep<input id="upkeep_cost" type="number" value="6" min="0"></label>
+        <label>Problems / generation<input id="tasks_per_generation" type="number" value="8" min="1"></label>
+        <label>Tier 1 mix<input id="tier1" type="number" value="0.35" step="0.01" min="0"></label>
+        <label>Tier 2 mix<input id="tier2" type="number" value="0.30" step="0.01" min="0"></label>
+        <label>Tier 3 mix<input id="tier3" type="number" value="0.20" step="0.01" min="0"></label>
+        <label>Tier 4 mix<input id="tier4" type="number" value="0.15" step="0.01" min="0"></label>
       </div>
-      <div style="margin-top:12px;">
-        <button id="runBtn">Run Simulation</button>
+      <div style="margin-top:10px; display:flex; gap:8px;">
+        <button id="runBtn">2) Run Simulation</button>
+        <div id="status" class="muted" style="align-self:center;">Idle</div>
       </div>
     </div>
 
     <div class="card">
       <h2>Live Dashboard</h2>
-      <div id="summary">Idle</div>
-      <pre id="timeline">No run yet.</pre>
+      <div class="metrics" id="metrics"></div>
     </div>
 
-    <div class="card">
-      <h2>Agent Inspector (Top 5 by energy)</h2>
-      <pre id="agentsOut">No run yet.</pre>
+    <div class="tabs">
+      <button class="tab active" data-tab="dashboard">Dashboard</button>
+      <button class="tab" data-tab="report">Run Report</button>
+      <button class="tab" data-tab="inspector">Agent Inspector</button>
+      <button class="tab" data-tab="board">Board Viewer</button>
+      <button class="tab" data-tab="markdown">Markdown Summary</button>
     </div>
 
-    <div class="card">
-      <h2>Board + Reports Viewer</h2>
-      <pre id="reportsOut">No run yet.</pre>
+    <div class="panel active" id="dashboard">
+      <div class="grid3">
+        <div class="card"><h3>Population over time</h3><div id="populationChart_meta" class="chart-meta"></div><canvas id="populationChart"></canvas></div>
+        <div class="card"><h3>Average energy over time</h3><div id="energyChart_meta" class="chart-meta"></div><canvas id="energyChart"></canvas></div>
+        <div class="card"><h3>Births / deaths over time</h3><div id="birthDeathChart_meta" class="chart-meta"></div><canvas id="birthDeathChart"></canvas></div>
+        <div class="card"><h3>Role distribution over time</h3><div id="rolesChart_meta" class="chart-meta"></div><canvas id="rolesChart"></canvas></div>
+        <div class="card"><h3>Problem success by tier</h3><div id="tierChart_meta" class="chart-meta"></div><canvas id="tierChart"></canvas></div>
+        <div class="card"><h3>Diversity over time</h3><div id="diversityChart_meta" class="chart-meta"></div><canvas id="diversityChart"></canvas></div>
+      </div>
+      <div class="card"><h3>Latest Generation Snapshot</h3><pre id="latestSnapshot">No run yet.</pre></div>
     </div>
+
+    <div class="panel" id="report"><div class="card"><h3>5) Run Report</h3><pre id="reportOut">No report yet.</pre></div></div>
+    <div class="panel" id="inspector"><div class="card"><h3>6) Agent Inspector</h3><label>Select agent<select id="agentSelect"></select></label><pre id="agentInspectorOut">No agent selected.</pre></div></div>
+    <div class="panel" id="board">
+      <div class="card">
+        <h3>7) Board Viewer</h3>
+        <div class="grid">
+          <label>Message type<select id="boardTypeFilter"><option value="">All</option></select></label>
+          <label>Agent<select id="boardAgentFilter"><option value="">All</option></select></label>
+          <label>Problem<input id="boardProblemFilter" placeholder="e.g. G5_P2" /></label><div></div>
+        </div>
+        <table><thead><tr><th>Gen</th><th>Type</th><th>Agent</th><th>Problem</th><th>Detail</th></tr></thead><tbody id="boardTable"></tbody></table>
+      </div>
+    </div>
+    <div class="panel" id="markdown"><div class="card"><h3>8) Markdown Summary</h3><pre id="markdownOut">Will be generated after run.</pre></div></div>
   </div>
 
 <script>
-const preset = document.getElementById('preset');
-const seed = document.getElementById('seed');
-const agents = document.getElementById('agents');
-const generations = document.getElementById('generations');
-const summary = document.getElementById('summary');
-const timeline = document.getElementById('timeline');
-const agentsOut = document.getElementById('agentsOut');
-const reportsOut = document.getElementById('reportsOut');
-let presetMap = {};
+const fields = ["seed","agents","generations","initial_energy","reproduction_threshold","mutation_rate","upkeep_cost","tasks_per_generation"];
+const tabs = [...document.querySelectorAll('.tab')];
+const statusEl = document.getElementById('status');
+const runBtn = document.getElementById('runBtn');
+const presetEl = document.getElementById('preset');
+const latestSnapshotEl = document.getElementById('latestSnapshot');
+const reportOut = document.getElementById('reportOut');
+const markdownOut = document.getElementById('markdownOut');
+const agentSelect = document.getElementById('agentSelect');
+const agentInspectorOut = document.getElementById('agentInspectorOut');
+const boardTable = document.getElementById('boardTable');
+const boardTypeFilter = document.getElementById('boardTypeFilter');
+const boardAgentFilter = document.getElementById('boardAgentFilter');
+const boardProblemFilter = document.getElementById('boardProblemFilter');
+const metrics = document.getElementById('metrics');
 
-function applyPreset(p) {
-  if (!p) return;
-  if (typeof p.seed === 'number') seed.value = p.seed;
-  if (typeof p.agents === 'number') agents.value = p.agents;
-  if (typeof p.generations === 'number') generations.value = p.generations;
+let presetMap = {};
+let currentResult = null;
+const palette = ["#60a5fa", "#34d399", "#f59e0b", "#f87171", "#a78bfa", "#22d3ee", "#f472b6"];
+
+const val = (id) => Number(document.getElementById(id).value);
+const unique = (arr) => [...new Set(arr)];
+
+function setChartMeta(canvasId, series, minVal, maxVal, step, points){
+  const root = document.getElementById(`${canvasId}_meta`);
+  const legend = series.map((s) => `<span class="legend-item"><span class="legend-color" style="background:${s.color}"></span>${s.label}</span>`).join('');
+  root.innerHTML = `<div class="legend">${legend}</div><div class="scale-note">y: ${minVal.toFixed(2)} → ${maxVal.toFixed(2)}<br/>step: ${step.toFixed(2)} | points: ${points}</div>`;
 }
 
-async function loadPresets() {
-  const res = await fetch('/api/presets');
-  const data = await res.json();
-  presetMap = {};
-  preset.innerHTML = '';
+function compress(values, maxPoints=90){
+  if(values.length <= maxPoints) return values;
+  const chunk = Math.ceil(values.length / maxPoints);
+  const out = [];
+  for(let i=0;i<values.length;i+=chunk){
+    const block = values.slice(i, i + chunk);
+    out.push(block.reduce((a,b)=>a+b,0) / Math.max(1, block.length));
+  }
+  return out;
+}
 
+function smooth(values){
+  if(values.length < 4) return values;
+  return values.map((_, i) => {
+    const left = values[Math.max(0, i-1)];
+    const mid = values[i];
+    const right = values[Math.min(values.length-1, i+1)];
+    return (left + mid + right) / 3;
+  });
+}
+
+function drawLines(canvasId, inputSeries){
+  const c = document.getElementById(canvasId);
+  const ctx = c.getContext('2d');
+  const w = c.width = c.clientWidth;
+  const h = c.height = c.clientHeight;
+  const pad = {top: 20, right: 16, bottom: 24, left: 42};
+  const series = inputSeries.map((s, i) => ({
+    label: s.label,
+    color: s.color || palette[i % palette.length],
+    values: smooth(compress(s.values || [])),
+  }));
+  const all = series.flatMap((s) => s.values);
+  const minVal = Math.min(...all, 0);
+  const maxVal = Math.max(...all, 1);
+  const range = Math.max(1e-6, maxVal - minVal);
+  const maxLen = Math.max(2, ...series.map((s) => s.values.length));
+  const step = range / 4;
+
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = '#0b1222';
+  ctx.fillRect(0, 0, w, h);
+
+  ctx.strokeStyle = '#2c4370';
+  ctx.strokeRect(pad.left, pad.top, w - pad.left - pad.right, h - pad.top - pad.bottom);
+
+  ctx.fillStyle = '#8fa7d3';
+  ctx.font = '11px Inter, Arial';
+  for(let i=0;i<=4;i++){
+    const yVal = minVal + step * i;
+    const y = h - pad.bottom - ((yVal - minVal) / range) * (h - pad.top - pad.bottom);
+    ctx.strokeStyle = '#203155';
+    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(w - pad.right, y); ctx.stroke();
+    ctx.fillText(yVal.toFixed(2), 4, y + 3);
+  }
+
+  series.forEach((s) => {
+    ctx.strokeStyle = s.color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    s.values.forEach((v, i) => {
+      const x = pad.left + (i / (maxLen - 1)) * (w - pad.left - pad.right);
+      const y = h - pad.bottom - ((v - minVal) / range) * (h - pad.top - pad.bottom);
+      if(i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  });
+
+  setChartMeta(canvasId, series, minVal, maxVal, step, maxLen);
+}
+
+function applyPreset(p){
+  if(!p) return;
+  fields.forEach((key) => {
+    if(p[key] !== undefined && p[key] !== null) document.getElementById(key).value = p[key];
+  });
+  const tierMix = p.tier_mix || {"1":0.35,"2":0.30,"3":0.20,"4":0.15};
+  document.getElementById('tier1').value = tierMix["1"];
+  document.getElementById('tier2').value = tierMix["2"];
+  document.getElementById('tier3').value = tierMix["3"];
+  document.getElementById('tier4').value = tierMix["4"];
+}
+
+async function loadPresets(){
+  const data = await (await fetch('/api/presets')).json();
+  presetMap = {};
+  presetEl.innerHTML = '';
   data.presets.forEach((p) => {
     presetMap[p.id] = p;
-    const option = document.createElement('option');
-    option.value = p.id;
-    option.textContent = p.label;
-    preset.appendChild(option);
+    const o = document.createElement('option'); o.value = p.id; o.textContent = p.label; presetEl.appendChild(o);
   });
-
-  if (data.presets.length > 0) {
-    const defaultPreset = data.presets.find((p) => p.id === 'default.json') || data.presets[0];
-    preset.value = defaultPreset.id;
-    applyPreset(defaultPreset);
-  }
+  const d = data.presets.find((p) => p.id === 'default.json') || data.presets[0];
+  if(d){ presetEl.value = d.id; applyPreset(d); }
 }
 
-preset.addEventListener('change', () => applyPreset(presetMap[preset.value]));
+presetEl.addEventListener('change', () => applyPreset(presetMap[presetEl.value]));
 
-loadPresets().catch(() => {
-  summary.textContent = 'Could not load presets';
-});
+tabs.forEach((tab) => tab.addEventListener('click', () => {
+  tabs.forEach((t) => t.classList.remove('active'));
+  tab.classList.add('active');
+  document.querySelectorAll('.panel').forEach((p) => p.classList.remove('active'));
+  document.getElementById(tab.dataset.tab).classList.add('active');
+}));
 
-document.getElementById('runBtn').addEventListener('click', async () => {
-  summary.textContent = 'Running...';
-  const payload = {
-    preset: preset.value,
-    seed: Number(seed.value),
-    agents: Number(agents.value),
-    generations: Number(generations.value)
-  };
+function renderDashboard(result){
+  const timeline = result.timeline || [];
+  if(!timeline.length) return;
+  const latest = timeline[timeline.length - 1];
+  const tops = [...(result.agents || [])].sort((a,b) => b.energy - a.energy).slice(0,3).map((a) => `${a.agent_id}(${a.energy})`).join(', ');
+  const mk = (label, value) => `<div class="metric"><div class="muted">${label}</div><div>${value}</div></div>`;
+  metrics.innerHTML = [
+    mk('Current generation', latest.generation),
+    mk('Population size', latest.population),
+    mk('Births / deaths', `${latest.births} / ${latest.deaths}`),
+    mk('Avg energy', Number(latest.energy_distribution.mean || 0).toFixed(2)),
+    mk('Top agents', tops || '-'),
+    mk('Diversity score', latest.diversity_score || 0),
+    mk('Role distribution', Object.entries(latest.roles || {}).map(([k,v]) => `${k}:${v}`).join(', ') || '-'),
+    mk('Total solves/verifs/subtasks', `${result.totals.solved}/${result.totals.verified}/${result.totals.subtasks}`),
+  ].join('');
 
-  const res = await fetch('/api/run', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
-  });
+  latestSnapshotEl.textContent = JSON.stringify(latest, null, 2);
+  drawLines('populationChart', [{ label:'Population', values: timeline.map((t) => t.population), color:'#60a5fa' }]);
+  drawLines('energyChart', [{ label:'Avg energy', values: timeline.map((t) => t.energy_distribution.mean || 0), color:'#34d399' }]);
+  drawLines('birthDeathChart', [
+    { label:'Births', values: timeline.map((t) => t.births), color:'#22c55e' },
+    { label:'Deaths', values: timeline.map((t) => t.deaths), color:'#ef4444' },
+  ]);
 
-  const data = await res.json();
-  if (data.error) {
-    summary.textContent = `Error: ${data.error}`;
-    return;
-  }
+  const roleKeys = unique(timeline.flatMap((t) => Object.keys(t.roles || {})));
+  drawLines('rolesChart', roleKeys.map((r, i) => ({ label:r, values: timeline.map((t) => (t.roles||{})[r] || 0), color:palette[i % palette.length] })));
 
-  const result = data.result;
-  summary.textContent = `Done | Final population: ${result.final_population} | log: ${result.summary_path}`;
-  timeline.textContent = JSON.stringify(result.timeline.slice(-10), null, 2);
-  const topAgents = [...result.agents].sort((a,b) => b.energy - a.energy).slice(0, 5);
-  agentsOut.textContent = JSON.stringify(topAgents, null, 2);
-  reportsOut.textContent = JSON.stringify({
-    totalGenerations: result.timeline.length,
-    latest: result.timeline[result.timeline.length - 1]
+  drawLines('tierChart', ['1','2','3','4'].map((tier, i) => ({
+    label:`Tier ${tier} success`,
+    values: timeline.map((t) => {
+      const row = (t.problem_success_by_tier || {})[tier] || {solved:0,total:1};
+      return row.total ? row.solved / row.total : 0;
+    }),
+    color:palette[i % palette.length],
+  })));
+  drawLines('diversityChart', [{ label:'Diversity', values: timeline.map((t) => t.diversity_score || 0), color:'#a78bfa' }]);
+}
+
+function renderReport(result){ reportOut.textContent = JSON.stringify(result.report || {}, null, 2); }
+
+function showAgent(){
+  if(!currentResult) return;
+  const agent = (currentResult.agents || []).find((a) => a.agent_id === agentSelect.value);
+  if(!agent) return;
+  agentInspectorOut.textContent = JSON.stringify({
+    agent_id: agent.agent_id,
+    genome: agent.genome,
+    workflow: agent.workflow,
+    energy_history: agent.energy_history,
+    contributions: agent.contributions,
+    offspring: agent.offspring,
+    artifacts: agent.artifacts,
   }, null, 2);
+}
+
+function renderInspector(result){
+  const agents = [...(result.agents || [])].sort((a,b) => b.energy - a.energy);
+  agentSelect.innerHTML = '';
+  agents.forEach((a) => {
+    const o = document.createElement('option');
+    o.value = a.agent_id;
+    o.textContent = `${a.agent_id} | role=${a.role} | energy=${a.energy}`;
+    agentSelect.appendChild(o);
+  });
+  if(agents[0]){ agentSelect.value = agents[0].agent_id; showAgent(); }
+}
+
+function renderBoard(result){
+  const msgs = result.board_messages || [];
+  const types = unique(msgs.map((m) => m.message_type));
+  const agents = unique(msgs.map((m) => m.agent_id).filter(Boolean));
+  boardTypeFilter.innerHTML = '<option value="">All</option>' + types.map((t) => `<option>${t}</option>`).join('');
+  boardAgentFilter.innerHTML = '<option value="">All</option>' + agents.map((a) => `<option>${a}</option>`).join('');
+
+  function refresh(){
+    const t = boardTypeFilter.value;
+    const a = boardAgentFilter.value;
+    const p = boardProblemFilter.value.trim();
+    const filtered = msgs.filter((m) => (!t || m.message_type === t) && (!a || m.agent_id === a) && (!p || (m.problem_id || '').includes(p)));
+    boardTable.innerHTML = filtered.slice(-250).map((m) => `<tr><td>${m.generation}</td><td>${m.message_type}</td><td>${m.agent_id || '-'}</td><td>${m.problem_id || '-'}</td><td>${m.detail}</td></tr>`).join('');
+  }
+  boardTypeFilter.onchange = refresh; boardAgentFilter.onchange = refresh; boardProblemFilter.oninput = refresh; refresh();
+}
+
+agentSelect.addEventListener('change', showAgent);
+
+function renderAll(result){
+  currentResult = result;
+  renderDashboard(result);
+  renderReport(result);
+  renderInspector(result);
+  renderBoard(result);
+  markdownOut.textContent = `Generated: ${result.markdown_summary_path || 'n/a'}\n\nA markdown run summary file is written after each run.`;
+}
+
+async function startRun(){
+  const payload = {
+    preset: presetEl.value,
+    seed: val('seed'), agents: val('agents'), generations: val('generations'),
+    initial_energy: val('initial_energy'), reproduction_threshold: val('reproduction_threshold'),
+    mutation_rate: val('mutation_rate'), upkeep_cost: val('upkeep_cost'), tasks_per_generation: val('tasks_per_generation'),
+    tier_mix: {"1": val('tier1'), "2": val('tier2'), "3": val('tier3'), "4": val('tier4')},
+  };
+  const data = await (await fetch('/api/run', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)})).json();
+  if(data.error) throw new Error(data.error);
+}
+
+async function pollState(){
+  const data = await (await fetch('/api/state')).json();
+  if(data.status === 'running'){
+    const p = data.progress || {};
+    statusEl.textContent = `Running generation ${p.generation || 0} | population ${p.population || 0} | births ${p.births || 0} | deaths ${p.deaths || 0}`;
+  }
+  if(data.status === 'done' && data.result){ statusEl.textContent = `Done. Final population ${data.result.final_population}. Summary: ${data.result.summary_path}`; renderAll(data.result); runBtn.disabled = false; return true; }
+  if(data.status === 'error'){ statusEl.textContent = `Error: ${data.error}`; runBtn.disabled = false; return true; }
+  return false;
+}
+
+runBtn.addEventListener('click', async () => {
+  try{
+    runBtn.disabled = true;
+    statusEl.textContent = 'Launching run...';
+    await startRun();
+    let done = false;
+    while(!done){ await new Promise((r) => setTimeout(r, 800)); done = await pollState(); }
+  }catch(err){ statusEl.textContent = `Run failed: ${err.message}`; runBtn.disabled = false; }
 });
+
+loadPresets().catch((err) => statusEl.textContent = `Preset load failed: ${err.message}`);
 </script>
 </body>
 </html>

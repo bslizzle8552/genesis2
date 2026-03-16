@@ -39,14 +39,17 @@
       <label>Starting agents<input id="agents" type="number" value="10"></label>
       <label>Generations<input id="generations" type="number" value="50"></label>
       <label>Starting energy<input id="initial_energy" type="number" value="100"></label>
-      <label>Reproduction threshold<input id="reproduction_threshold" type="number" value="140"></label>
+      <label>Reproduction threshold<input id="reproduction_threshold" type="number" value="130"></label>
       <label>Mutation rate<input id="mutation_rate" type="number" step="0.01" value="0.15"></label>
       <label>Upkeep<input id="upkeep_cost" type="number" value="6"></label>
-      <label>Problems / generation<input id="tasks_per_generation" type="number" value="8"></label>
-      <label>Tier 1 mix<input id="tier1" type="number" step="0.01" value="0.35"></label>
-      <label>Tier 2 mix<input id="tier2" type="number" step="0.01" value="0.30"></label>
-      <label>Tier 3 mix<input id="tier3" type="number" step="0.01" value="0.20"></label>
-      <label>Tier 4 mix<input id="tier4" type="number" step="0.01" value="0.15"></label>
+      <label>Problems / generation<input id="tasks_per_generation" type="number" value="15"></label>
+      <label>Diversity bonus<input id="diversity_bonus" type="number" step="0.1" value="1.0"></label>
+      <label>Diversity min lineages<input id="diversity_min_lineages" type="number" value="4"></label>
+      <label>Immigrant injection count<input id="immigrant_injection_count" type="number" value="2"></label>
+      <label>Tier 1 mix<input id="tier1" type="number" step="0.01" value="0.34"></label>
+      <label>Tier 2 mix<input id="tier2" type="number" step="0.01" value="0.31"></label>
+      <label>Tier 3 mix<input id="tier3" type="number" step="0.01" value="0.21"></label>
+      <label>Tier 4 mix<input id="tier4" type="number" step="0.01" value="0.14"></label>
     </div>
     <div style="margin-top:10px;display:flex;gap:8px;">
       <button id="runBtn" class="primary">2) Run Simulation</button>
@@ -104,20 +107,21 @@
 </div>
 
 <script>
-const fields=["seed","agents","generations","initial_energy","reproduction_threshold","mutation_rate","upkeep_cost","tasks_per_generation"];
+const fields=["seed","agents","generations","initial_energy","reproduction_threshold","mutation_rate","upkeep_cost","tasks_per_generation","diversity_bonus","diversity_min_lineages","immigrant_injection_count"];
 let presetMap={}, currentResult=null;
 const v=(id)=>document.getElementById(id).value;
 const n=(id)=>Number(v(id));
 const tabs=[...document.querySelectorAll('.tab')];
 tabs.forEach(t=>t.onclick=()=>{tabs.forEach(x=>x.classList.remove('active'));t.classList.add('active');document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.getElementById(t.dataset.tab).classList.add('active');});
 
-function applyPreset(p){ if(!p) return; fields.forEach(k=>{ if(p[k]!==undefined&&p[k]!==null) document.getElementById(k).value=p[k]; }); const mix=p.tier_mix||{"1":0.35,"2":0.30,"3":0.20,"4":0.15}; [1,2,3,4].forEach(t=>document.getElementById(`tier${t}`).value=mix[String(t)]); }
+function applyPreset(p){ if(!p) return; fields.forEach(k=>{ if(p[k]!==undefined&&p[k]!==null) document.getElementById(k).value=p[k]; }); const mix=p.tier_mix||{"1":0.34,"2":0.31,"3":0.21,"4":0.14}; [1,2,3,4].forEach(t=>document.getElementById(`tier${t}`).value=mix[String(t)]); }
 async function loadPresets(){ const data=await (await fetch('/api/presets')).json(); const sel=document.getElementById('preset'); sel.innerHTML=''; data.presets.forEach(p=>{presetMap[p.id]=p; const o=document.createElement('option'); o.value=p.id;o.textContent=p.label;sel.appendChild(o);}); if(data.presets[0]){sel.value=data.presets[0].id;applyPreset(data.presets[0]);} sel.onchange=()=>applyPreset(presetMap[sel.value]); }
 
 function renderDashboard(r){
   const t=r.timeline||[]; const latest=t[t.length-1]||{}; const noApi=r.report?.no_api_capability_ceiling||{};
   const rows=[
     ["Final population", r.final_population], ["Total problems", (r.problems||[]).length], ["Solved", r.report?.problems?.solved||0], ["Unsolved", r.report?.problems?.unsolved||0],
+    ["Carrying capacity est.", r.report?.ecosystem_diagnostics?.carrying_capacity?.estimated_population||0], ["Reproduction bottleneck risk", r.report?.ecosystem_diagnostics?.reproduction_bottleneck_risk||"n/a"], ["Diversity collapse risk", r.report?.ecosystem_diagnostics?.diversity_collapse_risk||"n/a"],
     ["No-API plateau", String(noApi.plateau_detected)], ["Improved dimensions", (noApi.improved_dimensions||[]).join(', ')||'none'], ["Plateaued dimensions", (noApi.plateaued_dimensions||[]).join(', ')||'none'],
     ["Last generation", latest.generation||0], ["Avg energy", (latest.energy_distribution?.mean||0).toFixed(2)], ["Collab share", ((noApi.collaboration_effect?.collaborative_share||0)*100).toFixed(1)+'%']
   ];
@@ -133,6 +137,9 @@ function renderReport(r){
     ["Founder baseline vs evolved", JSON.stringify(c.founder_vs_evolved||{}, null, 2)],
     ["Unsolved tiers/domains", `tiers=${(c.unsolved_tiers||[]).join(', ')||'none'} | domains=${(c.unsolved_domains||[]).join(', ')||'none'}`],
     ["Collaboration/artifact impact", JSON.stringify({collaboration:c.collaboration_effect, artifacts:c.artifact_effect}, null, 2)],
+    ["Ecosystem diagnostics", JSON.stringify(r.report?.ecosystem_diagnostics||{}, null, 2)],
+    ["Role reproduction", JSON.stringify(r.report?.role_reproduction||{}, null, 2)],
+    ["Diversity support", JSON.stringify(r.report?.diversity_support||{}, null, 2)],
   ];
   document.getElementById('ceilingSummary').innerHTML=cards.map(([k,val])=>`<div class="kpi"><div class="muted">${k}</div><pre>${val}</pre></div>`).join('');
   document.getElementById('readableSummary').textContent=JSON.stringify(r.report?.readable_summary||{}, null, 2);
@@ -180,7 +187,7 @@ function renderAgents(r){ const sel=document.getElementById('agentSelect'); sel.
 function renderAll(r){ currentResult=r; renderDashboard(r); renderReport(r); renderBoard(r); renderAgents(r); document.getElementById('markdownOut').textContent=`Summary file: ${r.markdown_summary_path}`; refreshLedger(); }
 
 async function startRun(){
-  const payload={ preset:v('preset'), seed:n('seed'), agents:n('agents'), generations:n('generations'), initial_energy:n('initial_energy'), reproduction_threshold:n('reproduction_threshold'), mutation_rate:n('mutation_rate'), upkeep_cost:n('upkeep_cost'), tasks_per_generation:n('tasks_per_generation'), tier_mix:{"1":n('tier1'),"2":n('tier2'),"3":n('tier3'),"4":n('tier4')} };
+  const payload={ preset:v('preset'), seed:n('seed'), agents:n('agents'), generations:n('generations'), initial_energy:n('initial_energy'), reproduction_threshold:n('reproduction_threshold'), mutation_rate:n('mutation_rate'), upkeep_cost:n('upkeep_cost'), tasks_per_generation:n('tasks_per_generation'), diversity_bonus:n('diversity_bonus'), diversity_min_lineages:n('diversity_min_lineages'), immigrant_injection_count:n('immigrant_injection_count'), tier_mix:{"1":n('tier1'),"2":n('tier2'),"3":n('tier3'),"4":n('tier4')} };
   const res=await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   const data=await res.json(); if(data.error) throw new Error(data.error);
 }

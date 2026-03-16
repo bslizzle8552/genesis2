@@ -42,9 +42,12 @@ def discover_presets() -> List[Dict[str, object]]:
                 "tasks_per_generation": cfg.get("tasks_per_generation"),
                 "initial_energy": cfg.get("initial_energy"),
                 "upkeep_cost": cfg.get("upkeep_cost"),
-                "reproduction_threshold": cfg.get("reproduction_threshold", 140),
+                "reproduction_threshold": cfg.get("reproduction_threshold", 130),
                 "mutation_rate": cfg.get("mutation_rate", 0.15),
-                "tier_mix": cfg.get("tier_mix", {"1": 0.35, "2": 0.30, "3": 0.20, "4": 0.15}),
+                "diversity_bonus": cfg.get("diversity_bonus", 1.0),
+                "diversity_min_lineages": cfg.get("diversity_min_lineages", 4),
+                "immigrant_injection_count": cfg.get("immigrant_injection_count", 2),
+                "tier_mix": cfg.get("tier_mix", {"1": 0.34, "2": 0.31, "3": 0.21, "4": 0.14}),
             }
         )
 
@@ -57,12 +60,15 @@ def discover_presets() -> List[Dict[str, object]]:
                 "seed": 42,
                 "agents": 10,
                 "generations": 50,
-                "tasks_per_generation": 8,
+                "tasks_per_generation": 15,
                 "initial_energy": 100,
                 "upkeep_cost": 6,
-                "reproduction_threshold": 140,
+                "reproduction_threshold": 130,
                 "mutation_rate": 0.15,
-                "tier_mix": {"1": 0.35, "2": 0.30, "3": 0.20, "4": 0.15},
+                "diversity_bonus": 1.0,
+                "diversity_min_lineages": 4,
+                "immigrant_injection_count": 2,
+                "tier_mix": {"1": 0.34, "2": 0.31, "3": 0.21, "4": 0.14},
             },
         )
 
@@ -79,8 +85,8 @@ def config_from_request(payload: dict):
         raise ValueError("invalid preset path") from exc
 
     cfg = load_config(preset_path if preset_path.exists() else DEFAULT_CONFIG)
-    integer_fields = ["seed", "agents", "generations", "tasks_per_generation", "initial_energy", "upkeep_cost"]
-    float_fields = ["reproduction_threshold", "mutation_rate"]
+    integer_fields = ["seed", "agents", "generations", "tasks_per_generation", "initial_energy", "upkeep_cost", "diversity_min_lineages", "immigrant_injection_count"]
+    float_fields = ["reproduction_threshold", "mutation_rate", "diversity_bonus"]
 
     for key in integer_fields:
         if key in payload and payload[key] is not None:

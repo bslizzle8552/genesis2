@@ -24,14 +24,14 @@ class Agent:
 
     def choose_role(self) -> str:
         strategy = self.genome.strategy
-        if strategy["artifact_reuse_bias"] > 0.75:
-            return "coordinator"
-        if strategy["aggression"] > 0.6:
+        if strategy["aggression"] > 0.75:
             return "solver"
-        if self.genome.thresholds["verify_tier_gte"] <= 2:
-            return "verifier"
-        if self.genome.specialization["decomposition"] > 0.6:
+        if self.genome.specialization["decomposition"] > 0.58:
             return "decomposer"
+        if self.genome.thresholds["verify_tier_gte"] <= 2 or self.genome.specialization.get("logic", 0.0) > 0.72:
+            return "verifier"
+        if strategy["artifact_reuse_bias"] > 0.82:
+            return "coordinator"
         return "critic"
 
     def bid_score(self, domain: str, tier: int) -> float:

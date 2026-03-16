@@ -4,6 +4,16 @@
   "generations": 20,
   "initial_energy": 100,
   "upkeep_cost": 6,
-  "tasks_per_generation": 6,
-  "log_dir": "runs"
+  "tasks_per_generation": 10,
+  "log_dir": "runs",
+  "reproduction_threshold": 118,
+  "diversity_bonus": 1.0,
+  "diversity_min_lineages": 3,
+  "immigrant_injection_count": 1,
+  "tier_mix": {
+    "1": 0.38,
+    "2": 0.3,
+    "3": 0.2,
+    "4": 0.12
+  }
 }

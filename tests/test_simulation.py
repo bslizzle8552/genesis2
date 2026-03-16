@@ -29,14 +29,28 @@ def test_simulation_outputs_report_and_markdown(tmp_path):
     assert len(result["board_messages"]) >= 1
 
 
-
-def test_simulation_reports_contribution_ecology(tmp_path):
-    cfg = SimulationConfig(seed=7, agents=8, generations=8, tasks_per_generation=5, log_dir=str(tmp_path))
+def test_report_includes_role_and_reward_diagnostics(tmp_path):
+    cfg = SimulationConfig(seed=9, agents=12, generations=12, tasks_per_generation=8, log_dir=str(tmp_path))
     result = SimulationEngine(cfg).run()
 
-    assert "contribution_chains" in result
-    assert len(result["contribution_chains"]) > 0
-    assert "role_reward_totals" in result["report"]
-    assert "solver_dominance_diagnostic" in result["report"]
-    assert "reproduced_roles" in result["report"]
-    assert "support_accounting" in result["timeline"][0]
+    report = result["report"]
+    assert "role_contribution_totals" in report
+    assert "role_based_fitness" in report
+    assert "reward_sources" in report
+    assert "solver_dominance_risk" in report
+
+    reward_sources = report["reward_sources"]
+    assert reward_sources["verification"] > 0
+    assert reward_sources["decomposition"] > 0
+    assert reward_sources["subtasks"] > 0
+
+
+def test_support_roles_remain_viable_in_population(tmp_path):
+    cfg = SimulationConfig(seed=14, agents=18, generations=16, tasks_per_generation=10, log_dir=str(tmp_path))
+    result = SimulationEngine(cfg).run()
+
+    final_roles = [agent["role"] for agent in result["agents"]]
+    assert final_roles
+    assert any(role != "solver" for role in final_roles)
+    assert "verifier" in final_roles
+    assert "decomposer" in final_roles

@@ -44,6 +44,8 @@ class SimulationEngine:
         self._next_agent_id = 1
         self.agent_energy_history: Dict[str, List[Dict[str, float]]] = {}
         self.agent_contributions: Dict[str, Dict[str, float]] = {}
+        self.agent_contribution_history: Dict[str, List[float]] = {}
+        self.reproduced_roles: set[str] = set()
 
         for _ in range(config.agents):
             agent_id = self._claim_agent_id()
@@ -74,16 +76,22 @@ class SimulationEngine:
                 "verification_catches": 0,
                 "subtasks": 0,
                 "critiques": 0,
+                "plans": 0,
+                "critique_changes": 0,
+                "artifact_contributions": 0,
                 "decompositions": 0,
                 "integrations": 0,
                 "artifacts_created": 0,
                 "artifacts_reused": 0,
+                "offspring": 0,
                 "reward_final_solving": 0.0,
                 "reward_verification": 0.0,
                 "reward_subtasks": 0.0,
                 "reward_critique": 0.0,
                 "reward_decomposition": 0.0,
                 "reward_integration": 0.0,
+                "reward_earned": 0.0,
+                "meaningful_score": 0.0,
                 "meaningful_points": 0.0,
             },
         )
@@ -91,6 +99,15 @@ class SimulationEngine:
 
     def _agent_lookup(self) -> Dict[str, Agent]:
         return {agent.agent_id: agent for agent in self.agents}
+
+    def _pick_support_agent(self, role: str, excluded: set[str] | None = None) -> Agent | None:
+        problem = Problem(problem_id="support", generation=0, domain=random.choice(DOMAINS), tier=1, prompt_text="")
+        return self._pick_agent(role, problem, excluded=excluded)
+
+    def _award(self, agent_id: str, reward: float, _reward_kind: str, contribution_key: str) -> None:
+        if contribution_key in self.agent_contributions[agent_id]:
+            self.agent_contributions[agent_id][contribution_key] += 1
+        self._add_reward(agent_id, reward)
 
     def _pick_agent(self, role: str, problem: Problem, excluded: set[str] | None = None) -> Agent | None:
         banned = excluded if excluded else set()
@@ -137,9 +154,10 @@ class SimulationEngine:
         }
         field = field_map.get(contribution_type)
         if field:
-            bucket[field] += 1
+            bucket[field] = bucket.get(field, 0) + 1
         points = self._contribution_points(contribution_type)
         bucket["meaningful_score"] += points
+        bucket["meaningful_points"] += points
         bucket["reward_earned"] += round(reward, 3)
 
     def _add_reward(self, agent_id: str, reward: float) -> None:
@@ -439,7 +457,7 @@ class SimulationEngine:
         lineage_scores: Dict[str, Dict[str, float]] = {}
         for agent_id, contrib in self.agent_contributions.items():
             lineage_id = next((a.lineage_id for a in self.agents if a.agent_id == agent_id), None) or agent_id
-            bucket = lineage_scores.setdefault(lineage_id, {"solves": 0, "verifications": 0})
+            bucket = lineage_scores.setdefault(lineage_id, {"solves": 0, "verifications": 0, "meaningful_points": 0.0})
             bucket["solves"] += contrib.get("solves", 0)
             bucket["verifications"] += contrib.get("verifications", 0)
             bucket["meaningful_points"] += contrib.get("meaningful_points", 0.0)
@@ -512,6 +530,7 @@ class SimulationEngine:
             warnings.append("Population collapse risk")
         if avg_energy < 15:
             warnings.append("Average energy critically low")
+        excessive_windows = 0
         if excessive_windows >= 2:
             warnings.append("Solver dominance persisted above threshold")
 
@@ -576,6 +595,14 @@ class SimulationEngine:
             "warning_flags": warnings,
         }
 
+    def _compute_solver_dominance_risk(self, role_contribution_totals: Dict[str, Dict[str, float]], role_based_fitness: Dict[str, float]) -> Dict:
+        solver_points = role_contribution_totals.get("solver", {}).get("meaningful_points", 0.0)
+        total_points = sum(v.get("meaningful_points", 0.0) for v in role_contribution_totals.values())
+        return {
+            "solver_share": round(solver_points / max(1.0, total_points), 4),
+            "solver_fitness": round(role_based_fitness.get("solver", 0.0), 4),
+        }
+
     def _generate_markdown_summary(self, result: Dict, report: Dict) -> str:
         ceiling = report.get("no_api_capability_ceiling", {})
         lines = [
@@ -634,6 +661,12 @@ class SimulationEngine:
 
         for generation in range(1, self.config.generations + 1):
             births = deaths = artifact_reuse = artifact_created = solved = verified = subtasks = 0
+            critiques = decompositions = integrations = 0
+            generation_points = defaultdict(float)
+            generation_contribution_points = {
+                a.agent_id: self.agent_contributions.get(a.agent_id, {}).get("meaningful_points", 0.0)
+                for a in self.agents
+            }
             tier_solved = Counter()
             tier_total = Counter()
             domain_solved = Counter()
@@ -658,15 +691,17 @@ class SimulationEngine:
                     best.agents_involved.append(agent.agent_id)
                 best.contribution_chain.append({"generation": str(generation), "agent_id": agent.agent_id, "type": "claim", "detail": f"{agent.agent_id} claimed problem"})
 
+                chain = self._run_problem_ecology(best, generation)
+
                 board_events.append(
                     {
                         "generation": generation,
                         "message_type": "contribution_chain",
                         "agent_id": chain.get("integrator_id"),
-                        "problem_id": problem.problem_id,
-                        "tier": problem.tier,
-                        "domain": problem.domain,
-                        "detail": f"chain {problem.problem_id}: {', '.join(chain['attribution_log'])}",
+                        "problem_id": best.problem_id,
+                        "tier": best.tier,
+                        "domain": best.domain,
+                        "detail": f"chain {best.problem_id}: {', '.join(chain['attribution_log'])}",
                         "attribution": chain,
                     }
                 )
@@ -801,17 +836,18 @@ class SimulationEngine:
                             )
                 else:
                     if random.random() < 0.25:
+                        catcher = critic if critic else agent
                         agent.energy += REWARDS["catch_incorrect"]
                         best.contribution_chain.append({"generation": str(generation), "agent_id": agent.agent_id, "type": "catch_incorrect", "detail": f"{agent.agent_id} flagged incorrect work"})
                         board_events.append(
                             {
                                 "generation": generation,
                                 "message_type": "catch_incorrect",
-                                "agent_id": critic.agent_id,
+                                "agent_id": catcher.agent_id,
                                 "problem_id": best.problem_id,
                                 "tier": best.tier,
                                 "domain": best.domain,
-                                "detail": f"{critic.agent_id} caught incorrect attempt on {best.problem_id}",
+                                "detail": f"{catcher.agent_id} caught incorrect attempt on {best.problem_id}",
                             }
                         )
 
@@ -883,7 +919,7 @@ class SimulationEngine:
 
             for aid, starting_total in generation_contribution_points.items():
                 prev = self.agent_contribution_history.setdefault(aid, [])
-                delta = self.agent_contributions[aid]["meaningful_score"] - starting_total
+                delta = self.agent_contributions[aid]["meaningful_points"] - starting_total
                 prev.append(delta)
 
             for agent in self.agents:
@@ -945,6 +981,13 @@ class SimulationEngine:
             agent["workflow"] = agent["genome"].get("workflows", {})
 
         report = self._build_report(snapshots, all_problems, totals, agents_snapshot)
+        contribution_chains = [
+            {
+                "problem_id": p.problem_id,
+                "chain": p.contribution_chain,
+            }
+            for p in all_problems
+        ]
         result = {
             "summary_path": str(summary_path),
             "final_population": len(self.agents),

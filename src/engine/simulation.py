@@ -18,7 +18,7 @@ from src.world.problems import DOMAINS, Problem, spawn_problems
 
 
 ROLE_BUCKETS = ["solver", "verifier", "decomposer", "critic", "coordinator"]
-TIER_BOUNTIES = {1: 18.0, 2: 28.0, 3: 40.0, 4: 60.0}
+TIER_BOUNTIES = {1: 22.0, 2: 30.0, 3: 46.0, 4: 70.0}
 
 
 @dataclass
@@ -28,10 +28,13 @@ class SimulationConfig:
     generations: int = 50
     initial_energy: int = 100
     upkeep_cost: int = 6
-    tasks_per_generation: int = 8
+    tasks_per_generation: int = 15
     log_dir: str = "runs"
-    reproduction_threshold: float = 140.0
+    reproduction_threshold: float = 130.0
     mutation_rate: float = 0.15
+    diversity_bonus: float = 1.0
+    diversity_min_lineages: int = 4
+    immigrant_injection_count: int = 2
     tier_mix: Dict[str, float] | None = None
     api_access: bool = False
 
@@ -46,6 +49,7 @@ class SimulationEngine:
         self.agent_contributions: Dict[str, Dict[str, float]] = {}
         self.agent_contribution_history: Dict[str, List[float]] = {}
         self.reproduced_roles: set[str] = set()
+        self.role_reproduction_counts: Counter[str] = Counter()
 
         for _ in range(config.agents):
             agent_id = self._claim_agent_id()
@@ -129,13 +133,13 @@ class SimulationEngine:
     def _contribution_points(self, contribution_type: str) -> int:
         return {
             "solve": 6,
-            "verify": 5,
-            "verify_catch": 6,
-            "plan": 5,
-            "subtask": 4,
-            "critique": 4,
-            "critique_change": 6,
-            "integrate": 5,
+            "verify": 6,
+            "verify_catch": 7,
+            "plan": 6,
+            "subtask": 5,
+            "critique": 5,
+            "critique_change": 7,
+            "integrate": 6,
             "artifact": 3,
         }.get(contribution_type, 0)
 
@@ -276,26 +280,38 @@ class SimulationEngine:
             return chain
 
         has_intermediate = chain["plan_used"] or chain["subtasks_used"] > 0 or chain["artifact_improved_outcome"]
+        has_verification = bool(chain["verifier_id"])
+        full_chain = chain["plan_used"] and chain["subtasks_used"] > 0 and (has_verification or chain["critique_changed_result"])
+
         tier_multiplier = 1.0
         if problem.tier == 1:
-            tier_multiplier = 1.0 if has_intermediate else 0.9
+            tier_multiplier = 1.0 if not has_intermediate else 0.96
         elif problem.tier == 2:
-            tier_multiplier = 1.0 if chain["verifier_id"] else 0.72
+            tier_multiplier = 1.0 if not has_verification else 1.06
         elif problem.tier == 3:
-            tier_multiplier = 1.0 if (chain["verifier_id"] or has_intermediate) else 0.58
+            if has_verification and has_intermediate:
+                tier_multiplier = 1.12
+            elif has_verification or has_intermediate:
+                tier_multiplier = 0.92
+            else:
+                tier_multiplier = 0.72
         else:
-            full_chain = chain["plan_used"] and chain["subtasks_used"] > 0 and (chain["verifier_id"] or chain["critique_changed_result"])
-            tier_multiplier = 1.0 if full_chain else 0.42
+            if full_chain:
+                tier_multiplier = 1.22
+            elif has_verification and has_intermediate:
+                tier_multiplier = 0.88
+            else:
+                tier_multiplier = 0.55
         chain["tier_multiplier"] = round(tier_multiplier, 3)
 
         bounty = TIER_BOUNTIES.get(problem.tier, 25.0) * tier_multiplier
         weights = {
-            "planner": 0.16 if chain["planner_id"] else 0.0,
-            "subtasks": 0.22 if chain["subtask_ids"] else 0.0,
-            "verifier": 0.2 if chain["verifier_id"] else 0.0,
-            "critic": 0.1 if chain["critique_changed_result"] else 0.0,
-            "artifact": 0.07 if chain["artifact_ids"] else 0.0,
-            "integrator": 0.31,
+            "planner": 0.14 if chain["planner_id"] else 0.0,
+            "subtasks": 0.2 if chain["subtask_ids"] else 0.0,
+            "verifier": 0.24 if chain["verifier_id"] else 0.0,
+            "critic": 0.12 if chain["critique_changed_result"] else 0.0,
+            "artifact": 0.08 if chain["artifact_ids"] else 0.0,
+            "integrator": 0.36,
         }
         total_weight = sum(weights.values())
         if total_weight <= 0:
@@ -331,6 +347,76 @@ class SimulationEngine:
         chain["payouts"] = {aid: round(amount, 3) for aid, amount in payouts.items()}
         chain["attribution_log"].append(f"integrate:{integrator.agent_id}")
         return chain
+
+    def _inject_immigrants(self, generation: int, reason: str) -> int:
+        injected = max(0, int(self.config.immigrant_injection_count))
+        if injected <= 0:
+            return 0
+        for _ in range(injected):
+            agent_id = self._claim_agent_id()
+            immigrant = Agent(
+                agent_id=agent_id,
+                parent_id=None,
+                lineage_id=agent_id,
+                generation_born=generation,
+                genome=Genome.random(),
+                energy=float(self.config.initial_energy * 0.85),
+            )
+            self.agents.append(immigrant)
+            self._register_agent(agent_id)
+        return injected
+
+    def _calculate_ecosystem_diagnostics(self, timeline: List[Dict], role_contribution_totals: Dict[str, Dict[str, float]]) -> Dict:
+        if not timeline:
+            return {
+                "carrying_capacity": {"estimated_population": 0.0, "risk": "high"},
+                "reproduction_bottleneck_risk": "high",
+                "diversity_collapse_risk": "high",
+            }
+
+        recent = timeline[-min(20, len(timeline)):]
+        avg_pop = mean(s["population"] for s in recent)
+        avg_births = mean(s["births"] for s in recent)
+        avg_deaths = mean(s["deaths"] for s in recent)
+        avg_energy = mean((s.get("energy_distribution") or {}).get("mean", 0.0) for s in recent)
+
+        carrying_est = round(max(0.0, avg_pop + max(0.0, avg_births - avg_deaths) * 5), 2)
+        carrying_risk = "low" if carrying_est >= 20 else ("medium" if carrying_est >= 14 else "high")
+
+        repro_ratio = avg_births / max(0.1, avg_deaths)
+        repro_risk = "low" if repro_ratio >= 0.9 else ("medium" if repro_ratio >= 0.6 else "high")
+        if avg_energy < self.config.reproduction_threshold * 0.6:
+            repro_risk = "high"
+
+        recent_div = [s.get("diversity_score", 0.0) for s in recent]
+        diversity_risk = "low"
+        if recent_div and mean(recent_div) < 0.18:
+            diversity_risk = "high"
+        elif recent_div and mean(recent_div) < 0.3:
+            diversity_risk = "medium"
+
+        role_viability = {
+            role: {
+                "population": metrics.get("population", 0),
+                "reproductions": int(self.role_reproduction_counts.get(role, 0)),
+                "mean_points": round(metrics.get("meaningful_points", 0.0) / max(1, metrics.get("population", 0)), 3),
+            }
+            for role, metrics in role_contribution_totals.items()
+        }
+
+        return {
+            "carrying_capacity": {
+                "estimated_population": carrying_est,
+                "avg_population_recent": round(avg_pop, 2),
+                "avg_births_recent": round(avg_births, 3),
+                "avg_deaths_recent": round(avg_deaths, 3),
+                "avg_energy_recent": round(avg_energy, 3),
+                "risk": carrying_risk,
+            },
+            "reproduction_bottleneck_risk": repro_risk,
+            "diversity_collapse_risk": diversity_risk,
+            "role_viability_by_reproduction": role_viability,
+        }
 
     def _collect_lineages(self) -> Dict[str, List[str]]:
         lineages: Dict[str, List[str]] = {}
@@ -530,6 +616,8 @@ class SimulationEngine:
             warnings.append("Population collapse risk")
         if avg_energy < 15:
             warnings.append("Average energy critically low")
+        if timeline and mean(s.get("diversity_score", 0.0) for s in timeline[: min(50, len(timeline))]) < 0.3:
+            warnings.append("Early diversity collapse risk")
         excessive_windows = 0
         if excessive_windows >= 2:
             warnings.append("Solver dominance persisted above threshold")
@@ -541,6 +629,7 @@ class SimulationEngine:
         reproduced_roles = sorted(self.reproduced_roles)
 
         solver_risk = self._compute_solver_dominance_risk(role_contribution_totals, role_based_fitness)
+        ecosystem_diagnostics = self._calculate_ecosystem_diagnostics(timeline, role_contribution_totals)
 
         no_api = self._no_api_capability_report(timeline, all_problems, agents_snapshot)
 
@@ -576,12 +665,22 @@ class SimulationEngine:
                 "total_solves": totals["solved"],
                 "verification_rate": round(totals["verified"] / max(1, totals["solved"]), 3),
             },
+            "ecosystem_diagnostics": ecosystem_diagnostics,
+            "role_reproduction": {"roles_reproduced": reproduced_roles, "counts": dict(self.role_reproduction_counts)},
+            "diversity_support": {
+                "diversity_bonus": self.config.diversity_bonus,
+                "diversity_min_lineages": self.config.diversity_min_lineages,
+                "immigrant_injection_count": self.config.immigrant_injection_count,
+                "immigrants_injected": totals.get("diversity_injected", 0),
+            },
             "no_api_capability_ceiling": no_api,
             "readable_summary": {
                 "what_they_are_solving": problem_kinds,
                 "which_remain_unsolved": unresolved,
                 "are_harder_tiers_improving": no_api["improved_dimensions"],
                 "collaboration_vs_solo": no_api["collaboration_effect"],
+                "ecosystem": ecosystem_diagnostics,
+                "role_reproduction": {"roles_reproduced": reproduced_roles, "counts": dict(self.role_reproduction_counts)},
                 "evolution_before_plateau": {
                     "plateau_detected": no_api["plateau_detected"],
                     "plateau_dimensions": no_api["plateau_dimensions"],
@@ -655,6 +754,7 @@ class SimulationEngine:
             "reward_critique": 0.0,
             "reward_decomposition": 0.0,
             "reward_integration": 0.0,
+            "diversity_injected": 0,
         }
 
         tier_mix = self.config.tier_mix if self.config.tier_mix else {"1": 0.35, "2": 0.30, "3": 0.20, "4": 0.15}
@@ -677,6 +777,11 @@ class SimulationEngine:
             for problem in board.problems:
                 tier_total[str(problem.tier)] += 1
                 domain_total[problem.domain] += 1
+
+            current_lineages = len({a.lineage_id for a in self.agents})
+            if current_lineages >= self.config.diversity_min_lineages and self.config.diversity_bonus > 0:
+                for agent in self.agents:
+                    agent.energy += self.config.diversity_bonus
 
             for agent in sorted(self.agents, key=lambda a: a.energy, reverse=True):
                 open_tasks = board.open_problems()
@@ -872,14 +977,16 @@ class SimulationEngine:
                 if (
                     agent.energy >= self.config.reproduction_threshold
                     and agent.generation_age >= 2
-                    and generation_points.get(agent.agent_id, 0.0) >= REWARDS["useful_subtask"]
+                    and generation_points.get(agent.agent_id, 0.0) >= REWARDS["useful_subtask"] * 0.8
                 ):
                     child = reproduce(agent, self._next_agent_id, generation, mutation_rate=self.config.mutation_rate)
                     offspring.append(child)
                     self._next_agent_id += 1
                     self._register_agent(child.agent_id)
                     self.agent_contributions[agent.agent_id]["offspring"] += 1
-                    self.reproduced_roles.add(agent.choose_role())
+                    role = agent.choose_role()
+                    self.reproduced_roles.add(role)
+                    self.role_reproduction_counts[role] += 1
                     births += 1
                     board_events.append(
                         {
@@ -912,6 +1019,12 @@ class SimulationEngine:
                     )
 
             self.agents = survivors + offspring
+            lineage_count = len({a.lineage_id for a in self.agents})
+            if lineage_count < self.config.diversity_min_lineages:
+                injected = self._inject_immigrants(generation, reason="lineage_collapse")
+                if injected:
+                    births += injected
+                    totals["diversity_injected"] += injected
             lineages = Counter(a.lineage_id for a in self.agents)
             energies = [a.energy for a in self.agents]
             roles = Counter(a.choose_role() for a in self.agents)
@@ -952,6 +1065,7 @@ class SimulationEngine:
                 "roles": dict(roles),
                 "role_distribution": role_distribution,
                 "diversity_score": self._diversity_score(),
+                "lineage_count": len(lineages),
                 "problem_success_by_tier": {
                     tier: {"solved": tier_solved.get(tier, 0), "total": tier_total.get(tier, 0)}
                     for tier in ["1", "2", "3", "4"]

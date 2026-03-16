@@ -35,3 +35,15 @@ def test_config_from_request_supports_extended_fields():
     assert cfg.mutation_rate == 0.22
     assert cfg.upkeep_cost == 4
     assert cfg.tier_mix["4"] == 0.4
+
+
+def test_config_from_request_supports_diversity_controls():
+    cfg = config_from_request({
+        "preset": "experiment_fast.json",
+        "diversity_bonus": 2.0,
+        "diversity_min_lineages": 5,
+        "immigrant_injection_count": 3,
+    })
+    assert cfg.diversity_bonus == 2.0
+    assert cfg.diversity_min_lineages == 5
+    assert cfg.immigrant_injection_count == 3

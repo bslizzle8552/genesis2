@@ -1,5 +1,5 @@
 REWARDS = {
-    "correct_solution": 12,
+    "correct_solution": 13,
     "successful_verification": 9,
     "catch_incorrect": 12,
     "useful_subtask": 10,
@@ -12,6 +12,6 @@ REWARDS = {
 COSTS = {
     "solve_attempt": 4,
     "verify_attempt": 2,
-    "reproduction": 35,
+    "reproduction": 32,
     "upkeep": 6,
 }

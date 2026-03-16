@@ -4,7 +4,7 @@ import random
 from src.agents.agent import Agent
 
 
-REPRODUCTION_COST = 35
+REPRODUCTION_COST = 32
 
 
 def reproduce(parent: Agent, next_id: int, generation: int, mutation_rate: float = 0.15) -> Agent:

@@ -26,6 +26,8 @@ def test_simulation_outputs_report_and_markdown(tmp_path):
     assert "report" in result
     assert "warning_flags" in result["report"]
     assert "no_api_capability_ceiling" in result["report"]
+    assert "ecosystem_diagnostics" in result["report"]
+    assert "role_reproduction" in result["report"]
     assert Path(result["markdown_summary_path"]).exists()
     assert len(result["board_messages"]) >= 1
 

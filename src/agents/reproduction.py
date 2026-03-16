@@ -7,9 +7,9 @@ from src.agents.agent import Agent
 REPRODUCTION_COST = 35
 
 
-def reproduce(parent: Agent, next_id: int, generation: int) -> Agent:
+def reproduce(parent: Agent, next_id: int, generation: int, mutation_rate: float = 0.15) -> Agent:
     parent.energy -= REPRODUCTION_COST
-    child_genome = parent.genome.mutate()
+    child_genome = parent.genome.mutate(mutation_rate=mutation_rate)
     child = Agent(
         agent_id=f"A{next_id}",
         parent_id=parent.agent_id,

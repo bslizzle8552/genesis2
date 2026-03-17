@@ -9,12 +9,19 @@ import json
 from pathlib import Path
 import threading
 import time
-from typing import Dict, List
+from collections import deque
+from typing import Deque, Dict, List
 import uuid
 
 from src.analytics.bvl import events_from_problem_metrics
 from src.engine.simulation import SimulationEngine, load_config
-from src.tuner.adaptive_rig import adjust_parameters, build_find_stable_swarm_baseline, score_and_label_run
+from src.tuner.adaptive_rig import (
+    adjust_parameters,
+    build_find_stable_swarm_baseline,
+    canonical_config_signature,
+    generate_local_variants,
+    score_and_label_run,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -56,6 +63,7 @@ TUNING_STATE = {
     "final_outcome": None,
     "final_summary_path": None,
     "error": None,
+    "session_diagnostics": None,
 }
 
 
@@ -336,6 +344,17 @@ def _run_find_stable_swarm(max_runs: int) -> None:
     TUNING_STATE["final_outcome"] = None
     TUNING_STATE["final_summary_path"] = None
     TUNING_STATE["error"] = None
+    TUNING_STATE["session_diagnostics"] = {
+        "improving_parameters": {},
+        "dominance_worsening_parameters": {},
+        "repeated_configs": [],
+        "stall_events": [],
+        "search_status": "progressing",
+    }
+
+    run_queue: Deque[Dict[str, object]] = deque([dict(params)])
+    seen_signatures: Dict[tuple, int] = {}
+    no_improvement_streak = 0
 
     try:
         for i in range(1, max_runs + 1):
@@ -347,10 +366,22 @@ def _run_find_stable_swarm(max_runs: int) -> None:
 
             TUNING_STATE["current_run"] = i
             TUNING_STATE["run_in_batch"] = i
-            current = dict(params)
+            current = dict(run_queue.popleft() if run_queue else params)
             current["run_label"] = f"{session_id}_r{i}"
             current["experiment_id"] = session_id
             current["log_dir"] = str(session_dir)
+            current["agents"] = 25
+
+            signature = canonical_config_signature(current)
+            if seen_signatures.get(signature, 0) >= 1:
+                TUNING_STATE["session_diagnostics"]["repeated_configs"].append({"run": i, "signature": str(signature)})
+                if run_queue:
+                    continue
+                anchor = dict(best_run["params"] if best_run else params)
+                anchor["agents"] = 25
+                run_queue.extend(generate_local_variants(anchor, 3))
+                continue
+            seen_signatures[signature] = seen_signatures.get(signature, 0) + 1
             TUNING_STATE["current_parameters"] = current
 
             cfg = config_from_request({"preset": "ecosystem_optimal_v1.json", **current})
@@ -371,20 +402,22 @@ def _run_find_stable_swarm(max_runs: int) -> None:
             run_records.append(run_record)
             failure_modes[metrics["label"]] = failure_modes.get(metrics["label"], 0) + 1
             TUNING_STATE["latest_outcome_label"] = metrics["label"]
-
-            progression_entry = {
+            TUNING_STATE["score_progression"].append({
                 "run": i,
                 "score": metrics["score"],
                 "label": metrics["label"],
                 "run_id": result.get("run_id", ""),
                 "run_dir": result.get("run_dir", ""),
-            }
-            TUNING_STATE["score_progression"].append(progression_entry)
+            })
 
-            if best_run is None or metrics["score"] > float(best_run.get("score", 0.0)):
+            improved = best_run is None or metrics["score"] > float(best_run.get("score", 0.0))
+            if improved:
                 best_run = run_record
                 TUNING_STATE["best_run"] = run_record
                 TUNING_STATE["best_score"] = metrics["score"]
+                no_improvement_streak = 0
+            else:
+                no_improvement_streak += 1
 
             if metrics["healthy"] or metrics["near_healthy"]:
                 candidate_configs.append({
@@ -412,14 +445,39 @@ def _run_find_stable_swarm(max_runs: int) -> None:
                 break
 
             updated, reason = adjust_parameters(current, metrics)
+            updated["agents"] = 25
             params = updated
             TUNING_STATE["latest_adjustment_reason"] = reason
 
-            if metrics["label"] in {"failed_collapse", "failed_overshoot"} and i >= 3:
-                last_labels = [r["label"] for r in run_records[-3:]]
-                if len(set(last_labels)) == 1:
-                    TUNING_STATE["early_stop_reason"] = f"Early stop on clearly bad direction: repeated {metrics['label']}"
-                    break
+            diagnoses = set(metrics.get("diagnosis", []))
+            if improved:
+                for p in ["reproduction_threshold", "upkeep_cost", "reproduction_cooldown_generations", "mutation_rate", "tasks_per_generation", "diversity_bonus", "diversity_min_lineages"]:
+                    if current.get(p) != updated.get(p):
+                        TUNING_STATE["session_diagnostics"]["improving_parameters"][p] = TUNING_STATE["session_diagnostics"]["improving_parameters"].get(p, 0) + 1
+            if diagnoses.intersection({"early_dominance", "late_dominance", "low_diversity"}):
+                for p in ["mutation_rate", "diversity_bonus", "diversity_min_lineages", "reproduction_cooldown_generations"]:
+                    if current.get(p) != updated.get(p):
+                        TUNING_STATE["session_diagnostics"]["dominance_worsening_parameters"][p] = TUNING_STATE["session_diagnostics"]["dominance_worsening_parameters"].get(p, 0) + 1
+
+            run_queue.append(updated)
+            if metrics["score"] >= 70:
+                for variant in generate_local_variants(current, 3):
+                    variant["agents"] = 25
+                    variant["seed"] = int(current.get("seed", 42)) + (i * 7) + len(run_queue)
+                    run_queue.append(variant)
+
+            stalled = no_improvement_streak >= 4
+            if stalled:
+                TUNING_STATE["session_diagnostics"]["search_status"] = "stalled"
+                TUNING_STATE["session_diagnostics"]["stall_events"].append({"run": i, "reason": "no score improvement or repeated configs"})
+                anchor = dict(best_run["params"] if best_run else current)
+                anchor["agents"] = 25
+                for idx, variant in enumerate(generate_local_variants(anchor, 5), start=1):
+                    variant["agents"] = 25
+                    variant["seed"] = int(anchor.get("seed", 42)) + (i * 11) + idx
+                    run_queue.append(variant)
+                no_improvement_streak = 0
+                TUNING_STATE["session_diagnostics"]["search_status"] = "recovering"
 
         elapsed = int(time.monotonic() - started)
         TUNING_STATE["elapsed_seconds"] = elapsed
@@ -450,6 +508,7 @@ def _run_find_stable_swarm(max_runs: int) -> None:
             final_outcome=TUNING_STATE.get("final_outcome") or "No equilibrium found in 1 hour",
             repeatability=TUNING_STATE.get("repeatability"),
             early_stop_reason=TUNING_STATE.get("early_stop_reason"),
+            session_diagnostics=TUNING_STATE.get("session_diagnostics"),
         )
         summary_path = session_dir / "final_session_summary.json"
         summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -472,6 +531,7 @@ def _run_repeatability_validation(base_params: Dict[str, object], session_id: st
     catastrophic = 0
     for i in range(5):
         cfg_params = dict(base_params)
+        cfg_params["agents"] = 25
         cfg_params["seed"] = int(base_params.get("seed", 42)) + 100 + i
         cfg_params["run_label"] = f"{session_id}_repeatability_{i + 1}"
         cfg = config_from_request({"preset": "ecosystem_optimal_v1.json", **cfg_params})
@@ -500,7 +560,7 @@ def _run_repeatability_validation(base_params: Dict[str, object], session_id: st
     }
 
 
-def _build_tuning_summary(*, session_id: str, started_at: str, elapsed_seconds: int, run_records: List[Dict[str, object]], best_run: Dict[str, object] | None, candidate_configs: List[Dict[str, object]], failure_modes: Dict[str, int], final_outcome: str, repeatability: Dict[str, object] | None, early_stop_reason: str | None) -> Dict[str, object]:
+def _build_tuning_summary(*, session_id: str, started_at: str, elapsed_seconds: int, run_records: List[Dict[str, object]], best_run: Dict[str, object] | None, candidate_configs: List[Dict[str, object]], failure_modes: Dict[str, int], final_outcome: str, repeatability: Dict[str, object] | None, early_stop_reason: str | None, session_diagnostics: Dict[str, object] | None = None) -> Dict[str, object]:
     dominant = sorted(failure_modes.items(), key=lambda kv: kv[1], reverse=True)
     top_candidates = sorted(candidate_configs, key=lambda c: c["score"], reverse=True)[:3]
     suggested = "Increase anti-dominance pressure and reduce mutation volatility" if failure_modes.get("failed_overshoot", 0) > failure_modes.get("failed_collapse", 0) else "Increase initial energy and lower reproduction threshold to avoid collapse"
@@ -515,6 +575,7 @@ def _build_tuning_summary(*, session_id: str, started_at: str, elapsed_seconds: 
         "top_candidate_configs": top_candidates,
         "dominant_failure_modes": [{"label": label, "count": count} for label, count in dominant],
         "repeatability": repeatability,
+        "session_diagnostics": session_diagnostics or {},
         "early_stop_reason": early_stop_reason,
         "suggested_next_tuning_direction": suggested,
         "final_outcome": final_outcome,

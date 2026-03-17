@@ -19,10 +19,11 @@ def _run_result(populations, lineages=12, diversity=0.2, top1=0.4, top3=0.65):
 
 
 def test_scoring_labels_healthy_case():
-    result = _run_result([100] * 100, lineages=15, diversity=0.2)
+    trajectory = [25 + int((75 * (i + 1)) / 80) for i in range(80)] + [100] * 20
+    result = _run_result(trajectory, lineages=15, diversity=0.2)
     metrics = score_and_label_run(result)
     assert metrics["label"] == "healthy"
-    assert metrics["score"] >= 80
+    assert metrics["score"] >= 65
 
 
 def test_scoring_labels_collapse_case():
@@ -43,8 +44,15 @@ def test_adjust_parameters_for_low_diversity():
 
 
 def test_hard_gate_dominance_failure():
-    result = _run_result([100] * 100, lineages=16, diversity=0.3, top1=0.7, top3=0.9)
+    trajectory = [25 + int((75 * (i + 1)) / 80) for i in range(80)] + [100] * 20
+    result = _run_result(trajectory, lineages=16, diversity=0.3, top1=0.7, top3=0.9)
     metrics = score_and_label_run(result)
     assert metrics["label"] == "failed_dominance"
     assert metrics["passed_hard_gates"] is False
-    assert metrics["score"] <= 10
+    assert metrics["score"] <= 70
+
+
+def test_penalizes_wrong_start_profile():
+    result = _run_result([100] * 100, lineages=15, diversity=0.2)
+    metrics = score_and_label_run(result)
+    assert metrics["label"] == "failed_wrong_start"

@@ -99,6 +99,12 @@ def config_from_request(payload: dict):
     if "tier_mix" in payload and isinstance(payload["tier_mix"], dict):
         cfg.tier_mix = {str(k): float(v) for k, v in payload["tier_mix"].items()}
 
+    if "run_label" in payload and payload["run_label"] is not None:
+        cfg.run_label = str(payload["run_label"])
+
+    if "overwrite" in payload:
+        cfg.overwrite = bool(payload["overwrite"])
+
     return cfg
 
 

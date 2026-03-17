@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import random
+import re
 from statistics import mean
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
+import uuid
 
 from src.agents.agent import Agent
 from src.agents.genome import Genome
@@ -42,6 +45,7 @@ class SimulationConfig:
     experiment_id: str = "adhoc"
     reward_policy_id: str = "baseline"
     diagnostics_window: int = 12
+    overwrite: bool = False
 
 
 class SimulationEngine:
@@ -1225,10 +1229,49 @@ class SimulationEngine:
             lines.append(f"- {p['problem_id']} ({p['domain']}/T{p['tier']}): {p['prompt_text']}")
         return "\n".join(lines) + "\n"
 
-    def run(self, progress_callback=None) -> Dict:
+    def _sanitize_label(self, label: str) -> str:
+        cleaned = re.sub(r"[^A-Za-z0-9_-]+", "-", label.strip())
+        cleaned = re.sub(r"-{2,}", "-", cleaned).strip("-_")
+        return cleaned or "run"
+
+    def _build_run_identity(self) -> Dict[str, str]:
+        label = self._sanitize_label(self.config.run_label) if self.config.run_label else ""
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        short_id = uuid.uuid4().hex[:8]
+        run_id = f"{timestamp}__{short_id}"
+        run_folder_name = f"{label}__{run_id}" if label else run_id
+        return {
+            "label": label,
+            "timestamp": timestamp,
+            "short_id": short_id,
+            "run_id": run_id,
+            "run_folder_name": run_folder_name,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _create_run_dir(self) -> Dict[str, object]:
         run_root = Path(self.config.log_dir)
-        run_name = f"run_seed{self.config.seed}_g{self.config.generations}_{self.config.run_label}"
-        logger = SimulationLogger(run_root / run_name)
+        attempts = 0
+        while attempts < 10:
+            run_identity = self._build_run_identity()
+            run_dir = run_root / run_identity["run_folder_name"]
+            if run_dir.exists() and not self.config.overwrite:
+                attempts += 1
+                continue
+            run_dir.mkdir(parents=True, exist_ok=self.config.overwrite)
+            return {
+                "run_dir": run_dir,
+                "run_identity": run_identity,
+            }
+        raise FileExistsError("Unable to allocate unique run directory without overwrite")
+
+    def run(self, progress_callback=None) -> Dict:
+        run_setup = self._create_run_dir()
+        run_dir = run_setup["run_dir"]
+        run_identity = run_setup["run_identity"]
+        logger = SimulationLogger(run_dir)
+        config_snapshot = asdict(self.config)
+        (run_dir / "config.json").write_text(json.dumps(config_snapshot, indent=2), encoding="utf-8")
         snapshots: List[Dict] = []
         board_events: List[Dict] = []
         all_problems: List[Problem] = []
@@ -1807,6 +1850,10 @@ class SimulationEngine:
         ]
         result = {
             "summary_path": str(summary_path),
+            "run_id": run_identity["run_id"],
+            "run_dir": str(run_dir),
+            "run_label": run_identity["label"],
+            "started_at": run_identity["started_at"],
             "final_population": len(self.agents),
             "agents": agents_snapshot,
             "timeline": snapshots,
@@ -1815,7 +1862,7 @@ class SimulationEngine:
             "contribution_chains": contribution_chains,
             "report": report,
             "lineages": lineage_members,
-            "config": asdict(self.config),
+            "config": config_snapshot,
             "phase_diagnostics": {
                 "by_generation": detected_phases,
                 "first_generation": phase_first_generation,
@@ -1852,6 +1899,19 @@ class SimulationEngine:
         markdown_path = Path(summary_path).with_name("run_summary.md")
         markdown_path.write_text(self._generate_markdown_summary(result, report), encoding="utf-8")
         result["markdown_summary_path"] = str(markdown_path)
+
+        finished_at = datetime.now(timezone.utc).isoformat()
+        manifest = {
+            "run_id": run_identity["run_id"],
+            "label": run_identity["label"],
+            "started_at": run_identity["started_at"],
+            "finished_at": finished_at,
+            "config_snapshot": config_snapshot,
+            "files": sorted([path.name for path in run_dir.iterdir() if path.is_file()] + ["run_manifest.json"]),
+        }
+        (run_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        result["finished_at"] = finished_at
+        result["manifest_path"] = str(run_dir / "run_manifest.json")
         return result
 
 

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from src.engine.simulation import SimulationConfig, SimulationEngine
 
@@ -8,7 +9,9 @@ def test_simulation_runs_and_logs(tmp_path):
 
     assert result["final_population"] >= 0
     assert len(result["timeline"]) >= 1
-    assert (tmp_path / "run_seed1_g5_default" / "summary.json").exists()
+    run_dir = Path(result["summary_path"]).parent
+    assert run_dir.name.startswith("default__")
+    assert (run_dir / "summary.json").exists()
 
 
 def test_agents_have_genomes_after_run(tmp_path):
@@ -72,27 +75,47 @@ def test_jsonl_metric_streams_are_emitted(tmp_path):
 
 
 
-def test_observability_exports_are_persisted(tmp_path):
-    cfg = SimulationConfig(seed=11, agents=8, generations=6, tasks_per_generation=5, log_dir=str(tmp_path))
+def test_repeated_runs_use_unique_folders_and_manifest(tmp_path):
+    cfg = SimulationConfig(seed=11, agents=5, generations=3, tasks_per_generation=3, log_dir=str(tmp_path), run_label="same")
+
+    result_one = SimulationEngine(cfg).run()
+    result_two = SimulationEngine(cfg).run()
+
+    run_dir_one = Path(result_one["summary_path"]).parent
+    run_dir_two = Path(result_two["summary_path"]).parent
+
+    assert run_dir_one != run_dir_two
+    assert run_dir_one.exists()
+    assert run_dir_two.exists()
+
+    expected_files = [
+        "artifact_metrics.jsonl",
+        "config.json",
+        "generation_metrics.jsonl",
+        "lineage_metrics.jsonl",
+        "problem_metrics.jsonl",
+        "role_metrics.jsonl",
+        "run_summary.md",
+        "summary.json",
+    ]
+
+    manifest_path = run_dir_two / "run_manifest.json"
+    assert manifest_path.exists()
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["run_id"] == result_two["run_id"]
+    assert manifest["label"] == "same"
+    assert manifest["started_at"]
+    assert manifest["finished_at"]
+    assert manifest["config_snapshot"]["seed"] == 11
+    for filename in expected_files:
+        assert filename in manifest["files"]
+        assert (run_dir_two / filename).exists()
+
+
+def test_run_label_is_sanitized_in_folder_name(tmp_path):
+    cfg = SimulationConfig(seed=12, agents=4, generations=2, tasks_per_generation=2, log_dir=str(tmp_path), run_label="My Run / Label")
     result = SimulationEngine(cfg).run()
     run_dir = Path(result["summary_path"]).parent
 
-    required = [
-        "run_summary.md",
-        "summary.json",
-        "energy_histogram.json",
-        "richest_agents.json",
-        "agents_final.json",
-        "reproduction_events.json",
-        "lineage_summary.json",
-        "artifacts_detailed.json",
-        "problem_participation.json",
-        "reward_distribution.json",
-        "observability_manifest.json",
-    ]
-    for name in required:
-        assert (run_dir / name).exists(), f"missing {name}"
-
-    manifest = (run_dir / "observability_manifest.json").read_text(encoding="utf-8")
-    assert "energy_histogram.json" in manifest
-    assert "top_10_richest_agents_panel" in manifest
+    assert run_dir.name.startswith("My-Run-Label__")

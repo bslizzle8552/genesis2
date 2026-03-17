@@ -163,3 +163,42 @@ def test_markdown_report_includes_advisory_section():
     })
     assert "## Advisory API Usage" in report
     assert "Calls: 1" in report
+
+
+def test_tuning_summary_includes_human_readable_sections():
+    run = {
+        "run_in_batch": 1,
+        "score": 55.0,
+        "label": "failed_low_diversity",
+        "params": {"agents": 25, "reproduction_threshold": 130, "mutation_rate": 0.2},
+        "metrics": {
+            "score": 55.0,
+            "label": "failed_low_diversity",
+            "final_population": 54,
+            "lineage_count": 3,
+            "diagnosis": ["low_diversity", "late_dominance"],
+            "hard_gates": {"starts_near_25_ok": True, "reaches_target_by_generation_80_ok": False, "lineage_count_ok": False, "top_lineage_share_ok": False, "top_3_lineage_share_ok": False, "late_stability_ok": False},
+        },
+        "timeline": [{"generation": 1, "population": 25, "births": 1, "lineages": {"L1": 25}}],
+        "result": {"agents": [], "timeline": [], "problems": [], "board_messages": [], "run_dir": ""},
+        "adjustment_reason": "increase diversity bonus",
+    }
+    summary = _build_tuning_summary(
+        session_id="s1",
+        started_at="2025-01-01T00:00:00Z",
+        elapsed_seconds=12,
+        run_records=[run],
+        best_run=run,
+        candidate_configs=[],
+        failure_modes={"failed_low_diversity": 1},
+        final_outcome="No Equilibrium Found",
+        repeatability=None,
+        early_stop_reason=None,
+        session_diagnostics={},
+        advisory_settings={"advisory_api_enabled": True},
+        advisory_usage={"calls": 1, "accepted": 0, "operator_summaries": ["fallback"]},
+    )
+    human = summary["human_readable_summary"]
+    assert "executive_summary" in human
+    assert "run_level_reports" in human
+    assert human["failure_breakdown"]["dominance"] >= 1 or human["failure_breakdown"]["low_diversity"] >= 1

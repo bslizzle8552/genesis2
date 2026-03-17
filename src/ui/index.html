@@ -57,6 +57,19 @@
         <label class="tuning-option disabled"><input type="radio" name="tuningMode" value="maximize_diversity" disabled> Maximize Diversity <span class="muted">(coming soon)</span></label>
         <label class="tuning-option disabled"><input type="radio" name="tuningMode" value="stress_test" disabled> Stress Test (chaos mode) <span class="muted">(coming soon)</span></label>
       </div>
+      <div class="card" style="margin-top:10px;">
+        <h3>Advisory API Configuration (Optional)</h3>
+        <p class="muted">If enabled, the deterministic tuner can merge bounded advice from an API call. Configure endpoint + API key env var name here.</p>
+        <div class="grid2">
+          <label><span>Enable advisory API</span><input id="advisory_api_enabled" type="checkbox" /></label>
+          <label><span>Advisory mode</span><select id="advisory_mode"><option value="post_run">post_run</option></select></label>
+          <label><span>Advisory endpoint</span><input id="advisory_endpoint" placeholder="https://.../advice" /></label>
+          <label><span>API key environment variable name</span><input id="advisory_api_key_env" placeholder="GENESIS2_ADVISORY_API_KEY" value="GENESIS2_ADVISORY_API_KEY" /></label>
+          <label><span>Model name</span><input id="advisory_model_name" value="local-advisor" /></label>
+          <label><span>Max advisory calls per session</span><input id="advisory_max_calls_per_session" type="number" value="20" /></label>
+        </div>
+        <p class="muted">Fallback behavior: if disabled, endpoint missing, or API key absent, tuner continues in deterministic-only mode.</p>
+      </div>
       <div style="margin-top:10px;display:flex;gap:8px;align-items:center;">
         <button id="startTuningBtn" class="primary" style="max-width:220px;">Start Tuning</button>
         <div id="tuningStatus" class="muted">Idle</div>
@@ -217,20 +230,42 @@ function renderTuningState(data){
   document.getElementById('tuningProgression').textContent = (data?.score_progression||[]).length ? JSON.stringify(data.score_progression, null, 2) : 'No scores yet.';
   const summary = data?.human_readable_summary;
   if(summary){
-    document.getElementById('tuningReadableSummary').textContent = JSON.stringify({
-      session_outcome_banner: summary.session_outcome_banner,
-      goal_card: summary.goal_card,
-      best_run_card: summary.best_run_card,
-      failure_summary_card: summary.failure_summary_card,
-      parameter_journey: summary.parameter_journey,
-      score_progression_chart: summary.score_progression_chart,
-      population_outcome_chart: summary.population_outcome_chart,
-      recommendation_card: summary.recommendation_card,
-      plain_english_run_explanations: summary.plain_english_run_explanations,
-    }, null, 2);
+    const exec = summary.executive_summary || {};
+    const best = summary.best_run_summary || {};
+    const failures = summary.failure_breakdown || {};
+    const runs = summary.run_level_reports || [];
+    const lines = [
+      'Executive Summary',
+      `- Outcome: ${exec.outcome}`,
+      `- Stable swarm achieved: ${exec.stable_swarm_achieved}`,
+      `- Runs attempted: ${exec.runs_attempted}`,
+      `- Best run: ${exec.best_run_number} (score=${exec.best_score})`,
+      '',
+      'Best Run Summary',
+      `- Result: ${best.result || 'n/a'}`,
+      `- Biggest failure mode: ${best?.score_explanation?.biggest_failure_mode || 'n/a'}`,
+      '',
+      'Failure Breakdown',
+      ...Object.entries(failures).map(([k,v]) => `- ${k}: ${v}`),
+      '',
+      'Final Recommendation',
+      `- ${summary?.final_recommendation?.action || 'keep tuning'}`,
+      `- Next likely lever: ${summary?.final_recommendation?.next_likely_lever || 'n/a'}`,
+      '',
+      'Run-Level Reports',
+    ];
+    runs.slice(0, 8).forEach((r) => {
+      lines.push(`Run ${r.run_number}: ${r.result}`);
+      (r.what_happened || []).slice(0, 3).forEach((x) => lines.push(`  - ${x}`));
+      lines.push(`  - Next tuner change: ${r.next_change}`);
+    });
+
+    document.getElementById('tuningReadableSummary').textContent = lines.join('\n');
     document.getElementById('tuningAdvancedDetails').textContent = JSON.stringify({
       advisory_usage: data?.advisory_usage,
       advisory_settings: data?.advisory_settings,
+      parameter_evolution: summary?.parameter_evolution,
+      run_level_reports: summary?.run_level_reports,
       session_diagnostics: data?.session_diagnostics,
       final_summary_path: data?.final_summary_path,
       human_readable_report_path: data?.human_readable_report_path,
@@ -275,7 +310,15 @@ async function startTuningMode(){
   tuningModeActive = true;
   updateManualConfigVisualState();
   document.getElementById('startTuningBtn').disabled = true;
-  const res = await fetch('/api/tuning/start', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({mode, max_runs: 99999})});
+  const advisory = {
+    advisory_api_enabled: document.getElementById('advisory_api_enabled')?.checked || false,
+    advisory_mode: document.getElementById('advisory_mode')?.value || 'post_run',
+    advisory_endpoint: document.getElementById('advisory_endpoint')?.value || '',
+    advisory_api_key_env: document.getElementById('advisory_api_key_env')?.value || 'GENESIS2_ADVISORY_API_KEY',
+    advisory_model_name: document.getElementById('advisory_model_name')?.value || 'local-advisor',
+    advisory_max_calls_per_session: Number(document.getElementById('advisory_max_calls_per_session')?.value || 20),
+  };
+  const res = await fetch('/api/tuning/start', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({mode, max_runs: 99999, ...advisory})});
   const data = await res.json();
   if(data.error){
     document.getElementById('startTuningBtn').disabled = false;

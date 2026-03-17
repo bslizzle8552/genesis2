@@ -72,3 +72,33 @@ Tune controls in that JSON file:
 The run stops when timeout is reached or enough qualifying configs are harvested. Outputs include:
 - `runs_detailed.json`, `config_aggregates.json`, `leaderboard.json`
 - `harvested_stable_swarms_registry.json` (qualifying config registry + goal conditions)
+
+
+## Adaptive tuning rig human-readable reports
+
+Start the local control server:
+
+```bash
+python -m src.backends.server --host 0.0.0.0 --port 8000
+```
+
+Then open `http://localhost:8000` and use **Adaptive Tuning Rig**.
+
+Each tuning session now writes a unique folder under `runs/tuning_sessions/<session_id>/` with:
+- `final_session_summary.json` (machine + human-readable report sections)
+- `final_session_report.md` (plain-English session notebook)
+- `runs.jsonl` (full per-run records)
+
+Each run directory still keeps existing artifacts and now includes additional observability exports (`reproduction_events.json`, `lineage_summary.json`, etc.).
+
+### Advisory API configuration
+
+You can configure advisory mode in three places:
+1. UI fields (endpoint, model, API key env var name, enabled toggle)
+2. Environment variables:
+   - `GENESIS2_ADVISORY_ENDPOINT`
+   - `GENESIS2_ADVISORY_MODEL`
+   - `GENESIS2_ADVISORY_API_KEY_ENV` (defaults to `GENESIS2_ADVISORY_API_KEY`)
+3. Optional config file: `config/advisory.json` (or `config/tuner_advisory.json`)
+
+Fallback behavior is deterministic-only tuning when advisory is disabled, endpoint is missing, or API key is absent.

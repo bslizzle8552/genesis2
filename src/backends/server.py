@@ -13,6 +13,7 @@ import time
 from collections import Counter, defaultdict, deque
 from statistics import mean
 from typing import Deque, Dict, List
+from urllib.parse import urlparse
 from urllib import error, request
 import uuid
 
@@ -70,6 +71,11 @@ TUNING_STATE = {
     "goal_profile": None,
     "advisory_settings": None,
     "advisory_usage": None,
+    "advisor_enabled_ui": False,
+    "advisor_active_runtime": False,
+    "advisor_failure_reason": None,
+    "advisory_calls_made": 0,
+    "advisory_events": [],
     "human_readable_summary": None,
     "human_readable_report_path": None,
 }
@@ -130,6 +136,7 @@ def _advisory_defaults() -> Dict[str, object]:
         "advisory_temperature": 0.1,
         "advisory_endpoint": os.getenv("GENESIS2_ADVISORY_ENDPOINT", ""),
         "advisory_api_key_env": os.getenv("GENESIS2_ADVISORY_API_KEY_ENV", "GENESIS2_ADVISORY_API_KEY"),
+        "advisory_api_key": "",
     }
     defaults.update({k: v for k, v in file_defaults.items() if k in defaults})
     return defaults
@@ -222,8 +229,9 @@ def _default_advisory_response() -> Dict[str, object]:
 
 def _call_advisory_api(payload: Dict[str, object], settings: Dict[str, object]) -> Dict[str, object]:
     endpoint = str(settings.get("advisory_endpoint") or "").strip()
-    if not endpoint:
-        return {"error": "endpoint_missing", "raw": None, "parsed": _default_advisory_response()}
+    parsed_endpoint = urlparse(endpoint)
+    if parsed_endpoint.scheme not in {"http", "https"} or not parsed_endpoint.netloc:
+        return {"error": "invalid_endpoint", "raw": None, "parsed": _default_advisory_response()}
     body = json.dumps({
         "model": settings.get("advisory_model_name"),
         "temperature": float(settings.get("advisory_temperature", 0.1)),
@@ -231,7 +239,10 @@ def _call_advisory_api(payload: Dict[str, object], settings: Dict[str, object]) 
         "payload": payload,
     }).encode("utf-8")
     headers = {"Content-Type": "application/json"}
-    api_key = os.getenv(str(settings.get("advisory_api_key_env", "GENESIS2_ADVISORY_API_KEY")), "")
+    direct_api_key = str(settings.get("advisory_api_key") or "").strip()
+    api_key = direct_api_key or os.getenv(str(settings.get("advisory_api_key_env", "GENESIS2_ADVISORY_API_KEY")), "")
+    if not api_key:
+        return {"error": "no_api_key", "raw": None, "parsed": _default_advisory_response()}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     req = request.Request(endpoint, data=body, headers=headers, method="POST")
@@ -242,7 +253,36 @@ def _call_advisory_api(payload: Dict[str, object], settings: Dict[str, object]) 
         parsed = json.loads(raw_text)
         return {"error": None, "raw": raw_text, "parsed": parsed}
     except (error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
-        return {"error": str(exc), "raw": None, "parsed": _default_advisory_response()}
+        return {"error": f"request_failed: {exc}", "raw": None, "parsed": _default_advisory_response()}
+
+
+def _advisory_failure_reason(error_value: str | None) -> str | None:
+    if not error_value:
+        return None
+    if error_value in {"no_api_key"}:
+        return "no API key"
+    if error_value in {"invalid_endpoint", "endpoint_missing"}:
+        return "invalid endpoint"
+    if error_value.startswith("request_failed"):
+        return "request failed"
+    return f"fallback to deterministic mode ({error_value})"
+
+
+def _advisory_payload_summary(payload: Dict[str, object]) -> str:
+    observed = payload.get("observed_results", {}) if isinstance(payload, dict) else {}
+    return (
+        f"outcome={observed.get('outcome_label')} score={observed.get('score')} "
+        f"final_pop={observed.get('final_population')} lineages={observed.get('lineage_count')}"
+    )
+
+
+def _advisory_response_summary(parsed: Dict[str, object] | None) -> str:
+    if not isinstance(parsed, dict):
+        return "No structured recommendation returned."
+    recs = parsed.get("parameter_recommendations", {})
+    keys = sorted(recs.keys()) if isinstance(recs, dict) else []
+    op = parsed.get("operator_summary")
+    return f"operator_summary={op or 'n/a'} recommendations={keys}"
 
 
 def _safe_change(current: Dict[str, object], key: str, action: str, delta: float, min_v: float, max_v: float, max_step: float) -> float:
@@ -878,6 +918,7 @@ def config_from_request(payload: dict):
         "lineage_size_penalty_enabled",
         "lineage_energy_share_penalty_enabled",
         "reproduction_cooldown_enabled",
+        "api_access",
     ]
 
     for key in integer_fields:
@@ -924,6 +965,10 @@ def _run_find_stable_swarm(max_runs: int, advisory_settings: Dict[str, object] |
     advisory_calls = 0
     advisory_accepted = 0
     operator_summaries: List[str] = []
+    advisory_events: List[Dict[str, object]] = []
+    advisor_enabled_ui = bool(advisory_settings.get("advisory_api_enabled"))
+    advisor_active_runtime = False
+    advisor_failure_reason: str | None = None
 
     TUNING_STATE["status"] = "running"
     TUNING_STATE["mode"] = "find_stable_swarm"
@@ -950,6 +995,11 @@ def _run_find_stable_swarm(max_runs: int, advisory_settings: Dict[str, object] |
     TUNING_STATE["goal_profile"] = GOAL_PROFILE
     TUNING_STATE["advisory_settings"] = advisory_settings
     TUNING_STATE["advisory_usage"] = {"calls": 0, "accepted": 0, "operator_summaries": []}
+    TUNING_STATE["advisor_enabled_ui"] = advisor_enabled_ui
+    TUNING_STATE["advisor_active_runtime"] = False
+    TUNING_STATE["advisor_failure_reason"] = None
+    TUNING_STATE["advisory_calls_made"] = 0
+    TUNING_STATE["advisory_events"] = []
     TUNING_STATE["human_readable_summary"] = None
     TUNING_STATE["human_readable_report_path"] = None
     TUNING_STATE["session_diagnostics"] = {
@@ -979,6 +1029,7 @@ def _run_find_stable_swarm(max_runs: int, advisory_settings: Dict[str, object] |
             current["experiment_id"] = session_id
             current["log_dir"] = str(session_dir)
             current["agents"] = 25
+            current["api_access"] = advisor_enabled_ui
 
             signature = canonical_config_signature(current)
             if seen_signatures.get(signature, 0) >= 1:
@@ -992,7 +1043,7 @@ def _run_find_stable_swarm(max_runs: int, advisory_settings: Dict[str, object] |
             seen_signatures[signature] = seen_signatures.get(signature, 0) + 1
             TUNING_STATE["current_parameters"] = current
 
-            cfg = config_from_request({"preset": "ecosystem_optimal_v1.json", **current})
+            cfg = config_from_request({"preset": "ecosystem_optimal_v1.json", "api_access": advisor_enabled_ui, **current})
             result = SimulationEngine(cfg).run()
             metrics = score_and_label_run(result)
             timeline = list(result.get("timeline", []))
@@ -1063,6 +1114,7 @@ def _run_find_stable_swarm(max_runs: int, advisory_settings: Dict[str, object] |
 
             deterministic_updated, reason = adjust_parameters(current, metrics)
             deterministic_updated["agents"] = 25
+            deterministic_updated["api_access"] = advisor_enabled_ui
             advice_record = {
                 "advisory_input": None,
                 "raw_advisory_response": None,
@@ -1084,24 +1136,46 @@ def _run_find_stable_swarm(max_runs: int, advisory_settings: Dict[str, object] |
                     metrics=metrics,
                     run_records=run_records,
                 )
-                advisory_result = _call_advisory_api(advisory_payload, advisory_settings)
                 advisory_calls += 1
+                advisory_result = _call_advisory_api(advisory_payload, advisory_settings)
                 parsed = advisory_result.get("parsed") if isinstance(advisory_result, dict) else _default_advisory_response()
                 merged, merge_explanation = _merge_advisory_with_deterministic(current, deterministic_updated, parsed if isinstance(parsed, dict) else _default_advisory_response())
                 merged["agents"] = 25
+                merged["api_access"] = advisor_enabled_ui
+                request_error = advisory_result.get("error") if isinstance(advisory_result, dict) else "request_failed: invalid response"
+                failure_reason = _advisory_failure_reason(request_error)
+                if request_error:
+                    advisor_failure_reason = f"{failure_reason}; fallback to deterministic mode"
+                else:
+                    advisor_active_runtime = True
+                event = {
+                    "run": i,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "call_made": True,
+                    "request_summary": _advisory_payload_summary(advisory_payload),
+                    "response_summary": _advisory_response_summary(parsed if isinstance(parsed, dict) else None),
+                    "recommendations_accepted": merge_explanation.startswith("merged_deterministic_api"),
+                    "recommendations_rejected": not merge_explanation.startswith("merged_deterministic_api"),
+                    "failure_reason": failure_reason,
+                    "merge_explanation": merge_explanation,
+                }
+                advisory_events.append(event)
                 advice_record = {
                     "advisory_input": advisory_payload,
                     "raw_advisory_response": advisory_result.get("raw") if isinstance(advisory_result, dict) else None,
                     "parsed_advisory_response": parsed,
                     "advice_accepted": merge_explanation.startswith("merged_deterministic_api"),
                     "applied_config_source": "api_assisted_tuner" if merge_explanation.startswith("merged_deterministic_api") else "deterministic_tuner",
-                    "merge_explanation": merge_explanation if not advisory_result.get("error") else f"{merge_explanation}; api_error={advisory_result.get('error')}",
+                    "merge_explanation": merge_explanation if not request_error else f"{merge_explanation}; api_error={request_error}",
+                    "failure_reason": failure_reason,
                 }
                 if advice_record["advice_accepted"]:
                     advisory_accepted += 1
                 if isinstance(parsed, dict) and parsed.get("operator_summary"):
                     operator_summaries.append(str(parsed.get("operator_summary")))
                 updated = merged
+            elif advisor_enabled_ui:
+                advisor_failure_reason = "fallback to deterministic mode"
 
             params = updated
             changed_parameters = {
@@ -1115,6 +1189,11 @@ def _run_find_stable_swarm(max_runs: int, advisory_settings: Dict[str, object] |
             TUNING_STATE["latest_adjustment_reason"] = reason
             run_records[-1]["adjustment_reason"] = reason
             TUNING_STATE["advisory_usage"] = {"calls": advisory_calls, "accepted": advisory_accepted, "operator_summaries": operator_summaries[-5:]}
+            TUNING_STATE["advisor_enabled_ui"] = advisor_enabled_ui
+            TUNING_STATE["advisor_active_runtime"] = advisor_active_runtime
+            TUNING_STATE["advisor_failure_reason"] = advisor_failure_reason
+            TUNING_STATE["advisory_calls_made"] = advisory_calls
+            TUNING_STATE["advisory_events"] = advisory_events[-20:]
 
             diagnoses = set(metrics.get("diagnosis", []))
             if improved:
@@ -1178,6 +1257,11 @@ def _run_find_stable_swarm(max_runs: int, advisory_settings: Dict[str, object] |
             session_diagnostics=TUNING_STATE.get("session_diagnostics"),
             advisory_settings=advisory_settings,
             advisory_usage={"calls": advisory_calls, "accepted": advisory_accepted, "operator_summaries": operator_summaries[-5:]},
+            advisor_enabled_ui=advisor_enabled_ui,
+            advisor_active_runtime=advisor_active_runtime,
+            advisor_failure_reason=advisor_failure_reason,
+            advisory_calls_made=advisory_calls,
+            advisory_events=advisory_events,
         )
         human_summary = _render_human_summary(
             final_outcome=TUNING_STATE.get("final_outcome") or "No Equilibrium Found",
@@ -1241,7 +1325,7 @@ def _run_repeatability_validation(base_params: Dict[str, object], session_id: st
     }
 
 
-def _build_tuning_summary(*, session_id: str, started_at: str, elapsed_seconds: int, run_records: List[Dict[str, object]], best_run: Dict[str, object] | None, candidate_configs: List[Dict[str, object]], failure_modes: Dict[str, int], final_outcome: str, repeatability: Dict[str, object] | None, early_stop_reason: str | None, session_diagnostics: Dict[str, object] | None = None, advisory_settings: Dict[str, object] | None = None, advisory_usage: Dict[str, object] | None = None) -> Dict[str, object]:
+def _build_tuning_summary(*, session_id: str, started_at: str, elapsed_seconds: int, run_records: List[Dict[str, object]], best_run: Dict[str, object] | None, candidate_configs: List[Dict[str, object]], failure_modes: Dict[str, int], final_outcome: str, repeatability: Dict[str, object] | None, early_stop_reason: str | None, session_diagnostics: Dict[str, object] | None = None, advisory_settings: Dict[str, object] | None = None, advisory_usage: Dict[str, object] | None = None, advisor_enabled_ui: bool = False, advisor_active_runtime: bool = False, advisor_failure_reason: str | None = None, advisory_calls_made: int = 0, advisory_events: List[Dict[str, object]] | None = None) -> Dict[str, object]:
     dominant = sorted(failure_modes.items(), key=lambda kv: kv[1], reverse=True)
     top_candidates = sorted(candidate_configs, key=lambda c: c["score"], reverse=True)[:3]
     suggested = "Increase anti-dominance pressure and reduce mutation volatility" if failure_modes.get("failed_overshoot", 0) > failure_modes.get("failed_collapse", 0) else "Increase initial energy and lower reproduction threshold to avoid collapse"
@@ -1270,6 +1354,11 @@ def _build_tuning_summary(*, session_id: str, started_at: str, elapsed_seconds: 
         "goal_profile": GOAL_PROFILE,
         "advisory_settings": advisory_settings or _advisory_defaults(),
         "advisory_usage": advisory_usage or {"calls": 0, "accepted": 0, "operator_summaries": []},
+        "advisor_enabled_ui": advisor_enabled_ui,
+        "advisor_active_runtime": advisor_active_runtime,
+        "advisor_failure_reason": advisor_failure_reason,
+        "advisory_calls_made": advisory_calls_made,
+        "advisory_events": advisory_events or [],
         "starting_population_root_cause": "Find Stable Swarm UI copy still said 100 agents; tuning execution always now force-clamps agents=25 in baseline, run loop, and repeatability path.",
         "human_readable_summary": human,
     }
@@ -1334,10 +1423,21 @@ def _build_markdown_report(summary: Dict[str, object]) -> str:
     lines += [
         "",
         "## Advisory API Usage",
-        f"- Calls: {advisory.get('calls', 0)}",
+        f"- UI enabled: {summary.get('advisor_enabled_ui', False)}",
+        f"- Active at runtime: {summary.get('advisor_active_runtime', False)}",
+        f"- Failure reason: {summary.get('advisor_failure_reason')}",
+        f"- Calls: {summary.get('advisory_calls_made', advisory.get('calls', 0))}",
         f"- Accepted merges: {advisory.get('accepted', 0)}",
         f"- Operator summaries: {advisory.get('operator_summaries', [])}",
         f"- API key env var: {summary.get('advisory_settings', {}).get('advisory_api_key_env', 'GENESIS2_ADVISORY_API_KEY')}",
+        "",
+        "## Advisory Event Log",
+    ]
+    for event in summary.get("advisory_events", [])[-20:]:
+        lines.append(
+            f"- Run {event.get('run')}: call_made={event.get('call_made')} request={event.get('request_summary')} response={event.get('response_summary')} accepted={event.get('recommendations_accepted')} rejected={event.get('recommendations_rejected')} failure={event.get('failure_reason')}"
+        )
+    lines += [
         "",
         "## Raw JSON",
         f"- Session summary JSON: `final_session_summary.json`",

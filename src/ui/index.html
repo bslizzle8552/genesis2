@@ -64,11 +64,16 @@
           <label><span>Enable advisory API</span><input id="advisory_api_enabled" type="checkbox" /></label>
           <label><span>Advisory mode</span><select id="advisory_mode"><option value="post_run">post_run</option></select></label>
           <label><span>Advisory endpoint</span><input id="advisory_endpoint" placeholder="https://.../advice" /></label>
-          <label><span>API key environment variable name</span><input id="advisory_api_key_env" placeholder="GENESIS2_ADVISORY_API_KEY" value="GENESIS2_ADVISORY_API_KEY" /></label>
+          <label><span>API key (paste directly)</span><input id="advisory_api_key" type="password" placeholder="sk-..." /></label>
+          <label><span>API key environment variable name (optional fallback)</span><input id="advisory_api_key_env" placeholder="GENESIS2_ADVISORY_API_KEY" value="GENESIS2_ADVISORY_API_KEY" /></label>
           <label><span>Model name</span><input id="advisory_model_name" value="local-advisor" /></label>
           <label><span>Max advisory calls per session</span><input id="advisory_max_calls_per_session" type="number" value="20" /></label>
         </div>
-        <p class="muted">Fallback behavior: if disabled, endpoint missing, or API key absent, tuner continues in deterministic-only mode.</p>
+        <p class="muted">No silent failures: advisor status and failure reasons are displayed live and in the final report.</p>
+      <div class="kpi"><div class="muted">Advisor Status</div><pre id="advisorStatus">UI enabled: false
+Runtime active: false
+Failure reason: null
+Calls made: 0</pre></div>
       </div>
       <div style="margin-top:10px;display:flex;gap:8px;align-items:center;">
         <button id="startTuningBtn" class="primary" style="max-width:220px;">Start Tuning</button>
@@ -262,6 +267,11 @@ function renderTuningState(data){
 
     document.getElementById('tuningReadableSummary').textContent = lines.join('\n');
     document.getElementById('tuningAdvancedDetails').textContent = JSON.stringify({
+      advisor_enabled_ui: data?.advisor_enabled_ui,
+      advisor_active_runtime: data?.advisor_active_runtime,
+      advisor_failure_reason: data?.advisor_failure_reason,
+      advisory_calls_made: data?.advisory_calls_made,
+      advisory_events: data?.advisory_events,
       advisory_usage: data?.advisory_usage,
       advisory_settings: data?.advisory_settings,
       parameter_evolution: summary?.parameter_evolution,
@@ -271,6 +281,13 @@ function renderTuningState(data){
       human_readable_report_path: data?.human_readable_report_path,
     }, null, 2);
   }
+  document.getElementById('advisorStatus').textContent = [
+    `UI enabled: ${Boolean(data?.advisor_enabled_ui)}`,
+    `Runtime active: ${Boolean(data?.advisor_active_runtime)}`,
+    `Failure reason: ${data?.advisor_failure_reason ?? 'null'}`,
+    `Calls made: ${Number(data?.advisory_calls_made || 0)}`
+  ].join('\n');
+
   document.getElementById('tuningLiveStatus').textContent = JSON.stringify({
     mode: data?.mode,
     elapsed_seconds: data?.elapsed_seconds,
@@ -314,6 +331,7 @@ async function startTuningMode(){
     advisory_api_enabled: document.getElementById('advisory_api_enabled')?.checked || false,
     advisory_mode: document.getElementById('advisory_mode')?.value || 'post_run',
     advisory_endpoint: document.getElementById('advisory_endpoint')?.value || '',
+    advisory_api_key: document.getElementById('advisory_api_key')?.value || '',
     advisory_api_key_env: document.getElementById('advisory_api_key_env')?.value || 'GENESIS2_ADVISORY_API_KEY',
     advisory_model_name: document.getElementById('advisory_model_name')?.value || 'local-advisor',
     advisory_max_calls_per_session: Number(document.getElementById('advisory_max_calls_per_session')?.value || 20),

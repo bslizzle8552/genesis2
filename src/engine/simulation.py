@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import random
 from statistics import mean
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from src.agents.agent import Agent
 from src.agents.genome import Genome
@@ -748,6 +748,252 @@ class SimulationEngine:
             },
         }
 
+    def _build_observability_exports(
+        self,
+        run_name: str,
+        timeline: List[Dict],
+        all_problems: List[Problem],
+        agents_snapshot: List[Dict],
+        report: Dict[str, Any],
+        reproduction_events: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        obs = report.get("observability", {})
+        energy_obs = obs.get("energy", {})
+
+        energy_histogram = {
+            "schema_version": "1.0",
+            "run_id": run_name,
+            "snapshot": "final",
+            "generation": timeline[-1].get("generation") if timeline else None,
+            "stats": energy_obs.get("stats", {"min": 0.0, "median": 0.0, "mean": 0.0, "p90": 0.0, "p99": 0.0}),
+            "buckets": energy_obs.get("histogram", []),
+        }
+
+        richest_agents = {
+            "schema_version": "1.0",
+            "run_id": run_name,
+            "top_n": 10,
+            "agents": [],
+        }
+        by_id = {a["agent_id"]: a for a in agents_snapshot}
+        for row in energy_obs.get("top_10_richest", []):
+            agent = by_id.get(row.get("agent_id"), {})
+            contrib = agent.get("contributions", {})
+            lifecycle = agent.get("lifecycle", {})
+            richest_agents["agents"].append({
+                "agent_id": row.get("agent_id"),
+                "lineage_id": agent.get("lineage_id"),
+                "role": agent.get("role"),
+                "energy": row.get("energy", 0.0),
+                "lifetime_solves": int(contrib.get("solves", 0)),
+                "lifetime_collaborations": int(contrib.get("integrations", 0)),
+                "reproduction_count": int(lifecycle.get("lifetime_births", contrib.get("offspring", 0) or 0)),
+            })
+
+        agents_final = {
+            "schema_version": "1.0",
+            "run_id": run_name,
+            "generation": timeline[-1].get("generation") if timeline else None,
+            "agents": [],
+        }
+        for agent in agents_snapshot:
+            contrib = agent.get("contributions", {})
+            life = agent.get("lifecycle", {})
+            agents_final["agents"].append({
+                "agent_id": agent.get("agent_id"),
+                "lineage_id": agent.get("lineage_id"),
+                "role": agent.get("role"),
+                "energy": agent.get("energy", 0.0),
+                "generation_born": agent.get("generation_born"),
+                "lifespan_generations": life.get("lifespan_generations"),
+                "reproduction_count": int(life.get("lifetime_births", contrib.get("offspring", 0) or 0)),
+                "lifetime_solves": int(contrib.get("solves", 0)),
+                "lifetime_verifications": int(contrib.get("verifications", 0)),
+                "lifetime_artifacts_created": int(contrib.get("artifacts_created", 0)),
+                "lifetime_artifacts_reused": int(contrib.get("artifacts_reused", 0)),
+                "lifetime_reward_earned": round(float(contrib.get("reward_earned", 0.0)), 4),
+                "meaningful_points": round(float(contrib.get("meaningful_points", 0.0)), 4),
+            })
+
+        lineage_members = self._collect_lineages()
+        lineage_summary = {
+            "schema_version": "1.0",
+            "run_id": run_name,
+            "lineages": [],
+        }
+        final_energy_by_lineage = Counter()
+        for agent in agents_snapshot:
+            final_energy_by_lineage[str(agent.get("lineage_id"))] += float(agent.get("energy", 0.0))
+        total_energy = sum(final_energy_by_lineage.values())
+
+        births_by_lineage = Counter(e.get("parent_lineage_id") for e in reproduction_events if e.get("parent_lineage_id") is not None)
+        deaths_by_lineage = Counter()
+        for aid, life in self.agent_lifecycle.items():
+            if any(a.get("agent_id") == aid for a in agents_snapshot):
+                continue
+            lineage_id = None
+            for agent in self.agents:
+                if agent.agent_id == aid:
+                    lineage_id = agent.lineage_id
+                    break
+            if lineage_id is None:
+                lineage_id = aid
+            deaths_by_lineage[str(lineage_id)] += 1
+
+        for lineage_id, members in lineage_members.items():
+            births = int(births_by_lineage.get(lineage_id, 0))
+            final_population = len(members)
+            lineage_summary["lineages"].append({
+                "lineage_id": lineage_id,
+                "final_population": final_population,
+                "births": births,
+                "deaths": int(deaths_by_lineage.get(lineage_id, 0)),
+                "total_descendants": births,
+                "energy_share": round(float(final_energy_by_lineage.get(lineage_id, 0.0)) / max(1e-9, total_energy), 6),
+            })
+
+        artifacts_detailed = {
+            "schema_version": "1.0",
+            "run_id": run_name,
+            "artifacts": [],
+        }
+        for artifact_id, payload in self.artifact_registry.items():
+            creator_lineage = payload.get("creator_lineage_id")
+            reuser_lineages = payload.get("reuser_lineage_ids") or []
+            cross_lineage_reuse = any(str(l) != str(creator_lineage) for l in reuser_lineages)
+            artifacts_detailed["artifacts"].append({
+                "artifact_id": artifact_id,
+                "creator_agent_id": payload.get("creator_agent_id"),
+                "creator_lineage_id": creator_lineage,
+                "generation_created": payload.get("generation_created"),
+                "reuse_count": payload.get("times_reused", 0),
+                "reused_by_agent_ids": payload.get("reuser_agent_ids", []),
+                "reused_by_lineage_ids": reuser_lineages,
+                "cross_lineage_reuse": cross_lineage_reuse,
+            })
+
+        problem_participation = {
+            "schema_version": "1.0",
+            "run_id": run_name,
+            "problems": [],
+        }
+        reward_distribution = {
+            "schema_version": "1.0",
+            "run_id": run_name,
+            "rewards": [],
+        }
+        for p in all_problems:
+            participants = list(dict.fromkeys(p.agents_involved))
+            role_map = {aid: next((a.get("role") for a in agents_snapshot if a.get("agent_id") == aid), None) for aid in participants}
+            problem_participation["problems"].append({
+                "problem_id": p.problem_id,
+                "generation": p.generation,
+                "domain": p.domain,
+                "tier": p.tier,
+                "solved": p.solved,
+                "participants": participants,
+                "participant_roles": role_map,
+                "collaborative": p.resolution_mode == "collaborative",
+                "artifact_assisted": any(step.get("type") == "artifact_reuse" for step in p.contribution_chain),
+            })
+            for recipient_id, amount in (p.reward_split or {}).items():
+                recipient = by_id.get(recipient_id, {})
+                reward_distribution["rewards"].append({
+                    "generation": p.generation,
+                    "problem_id": p.problem_id,
+                    "recipient_agent_id": recipient_id,
+                    "recipient_role": recipient.get("role"),
+                    "recipient_lineage_id": recipient.get("lineage_id"),
+                    "reward_source": "problem_reward",
+                    "reward_amount": round(float(amount), 4),
+                })
+
+        return {
+            "energy_histogram": energy_histogram,
+            "richest_agents": richest_agents,
+            "agents_final": agents_final,
+            "reproduction_events": {
+                "schema_version": "1.0",
+                "run_id": run_name,
+                "events": reproduction_events,
+            },
+            "lineage_summary": lineage_summary,
+            "artifacts_detailed": artifacts_detailed,
+            "problem_participation": problem_participation,
+            "reward_distribution": reward_distribution,
+        }
+
+    def _write_observability_exports(
+        self,
+        run_dir: Path,
+        run_name: str,
+        base_summary: Dict[str, Any],
+        report: Dict[str, Any],
+        exports: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        files: Dict[str, Dict[str, Any]] = {
+            "run_summary.md": {"status": "present", "notes": "human_readable_summary"},
+            "summary.json": {"status": "present", "notes": "legacy_generation_summary_plus_export_index"},
+        }
+
+        missing_notes: List[str] = []
+        for name, payload in exports.items():
+            path = run_dir / f"{name}.json"
+            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            files[path.name] = {"status": "present", "records": len(payload.get("events", payload.get("agents", payload.get("problems", payload.get("rewards", payload.get("artifacts", payload.get("lineages", payload.get("buckets", []))))))))}
+
+        if not exports.get("reproduction_events", {}).get("events"):
+            missing_notes.append("No reproduction event records captured; run may not have met reproduction thresholds.")
+        if not exports.get("artifacts_detailed", {}).get("artifacts"):
+            missing_notes.append("No artifacts were created; artifact-level export is empty.")
+
+        manifest = {
+            "schema_version": "1.0",
+            "run_id": run_name,
+            "config_snapshot": asdict(self.config),
+            "legacy_outputs": ["run_summary.md", "summary.json"],
+            "observability_files": sorted(files.keys()),
+            "files": files,
+            "dashboard_bindings": {
+                "energy_histogram_panel": "energy_histogram.json",
+                "top_10_richest_agents_panel": "richest_agents.json",
+            },
+            "audit": {
+                "computed_not_exported_before_fix": [
+                    "energy histogram buckets",
+                    "top 10 richest agents details",
+                    "birth events (parent-child)",
+                    "artifact-level reuser lineage details",
+                    "problem participation and reward split",
+                ],
+                "exported_not_used_by_dashboard": [
+                    "generation_metrics.jsonl",
+                    "lineage_metrics.jsonl",
+                    "role_metrics.jsonl",
+                    "problem_metrics.jsonl",
+                    "artifact_metrics.jsonl",
+                ],
+                "dashboard_expectations_missing_before_fix": [
+                    "observability.energy.histogram in persisted exports",
+                    "observability.energy.top_10_richest in persisted exports",
+                ],
+                "aggregate_only_metrics": [
+                    "reward totals by type",
+                    "births by role/lineage",
+                    "collaboration share over time",
+                ],
+            },
+            "notes_on_unavailable_fields": missing_notes,
+            "summary_excerpt": {
+                "generations": len(base_summary.get("generations", [])),
+                "final_population": report.get("executive_summary", {}).get("final_population"),
+            },
+        }
+        manifest_path = run_dir / "observability_manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        files[manifest_path.name] = {"status": "present", "notes": "schema+availability+audit"}
+        return manifest
+
     def _build_report(self, timeline: List[Dict], all_problems: List[Problem], totals: Dict[str, int], agents_snapshot: List[Dict]) -> Dict:
         solved = sum(1 for p in all_problems if p.solved)
         unsolved = len(all_problems) - solved
@@ -1009,6 +1255,7 @@ class SimulationEngine:
         cumulative_repeat_reproducers: set[str] = set()
         phase_first_generation: Dict[str, int] = {}
         detected_phases: List[Dict[str, object]] = []
+        reproduction_events: List[Dict[str, Any]] = []
 
         for generation in range(1, self.config.generations + 1):
             births = deaths = artifact_reuse = artifact_created = solved = verified = subtasks = 0
@@ -1256,10 +1503,26 @@ class SimulationEngine:
                     and agent.generation_age >= 2
                     and generation_points.get(agent.agent_id, 0.0) >= REWARDS["useful_subtask"] * 0.8
                 ):
+                    parent_energy_before = round(agent.energy, 4)
                     child = reproduce(agent, self._next_agent_id, generation, mutation_rate=self.config.mutation_rate)
+                    parent_energy_after = round(agent.energy, 4)
                     offspring.append(child)
                     self._next_agent_id += 1
                     self._register_agent(child.agent_id)
+                    reproduction_events.append(
+                        {
+                            "generation": generation,
+                            "parent_id": agent.agent_id,
+                            "child_id": child.agent_id,
+                            "parent_lineage_id": agent.lineage_id,
+                            "child_lineage_id": child.lineage_id,
+                            "parent_energy_before": parent_energy_before,
+                            "parent_energy_after": parent_energy_after,
+                            "child_start_energy": round(child.energy, 4),
+                            "mutation_applied": bool(self.config.mutation_rate > 0),
+                            "mutation_rate": self.config.mutation_rate,
+                        }
+                    )
                     self.agent_contributions[agent.agent_id]["offspring"] += 1
                     life = self.agent_lifecycle.setdefault(agent.agent_id, {})
                     life["lifetime_births"] = int(life.get("lifetime_births", 0)) + 1
@@ -1493,7 +1756,6 @@ class SimulationEngine:
         for artifact in self.artifact_registry.values():
             logger.log_stream("artifact_metrics", {"schema_version": "1.0", **artifact})
 
-        summary_path = logger.finalize()
         lineage_members = self._collect_lineages()
 
         agents_snapshot = [a.snapshot() for a in self.agents]
@@ -1509,6 +1771,33 @@ class SimulationEngine:
             agent["workflow"] = agent["genome"].get("workflows", {})
 
         report = self._build_report(snapshots, all_problems, totals, agents_snapshot)
+        run_dir = run_root / run_name
+        observability_exports = self._build_observability_exports(
+            run_name=run_name,
+            timeline=snapshots,
+            all_problems=all_problems,
+            agents_snapshot=agents_snapshot,
+            report=report,
+            reproduction_events=reproduction_events,
+        )
+        manifest = self._write_observability_exports(
+            run_dir=run_dir,
+            run_name=run_name,
+            base_summary={"generations": snapshots},
+            report=report,
+            exports=observability_exports,
+        )
+        summary_path = logger.finalize(
+            extra_payload={
+                "run_id": run_name,
+                "schema_version": "2.0",
+                "observability_exports": {
+                    "manifest": "observability_manifest.json",
+                    "files": sorted([f for f in manifest.get("observability_files", []) if f.endswith('.json')]),
+                },
+            }
+        )
+
         contribution_chains = [
             {
                 "problem_id": p.problem_id,
@@ -1532,6 +1821,10 @@ class SimulationEngine:
                 "first_generation": phase_first_generation,
                 "peak_population_generation": max(snapshots, key=lambda s: s.get("population", 0)).get("generation", 0) if snapshots else 0,
                 "stabilization_start_generation": phase_first_generation.get("stabilization"),
+            },
+            "observability_exports": {
+                "manifest_path": str(run_dir / "observability_manifest.json"),
+                "files": manifest.get("observability_files", []),
             },
             "problems": [
                 {

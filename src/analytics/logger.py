@@ -19,9 +19,12 @@ class SimulationLogger:
     def log_stream(self, stream_name: str, payload: Dict) -> None:
         self.streams.setdefault(stream_name, []).append(payload)
 
-    def finalize(self) -> Path:
+    def finalize(self, extra_payload: Dict | None = None) -> Path:
         out = self.run_dir / "summary.json"
-        out.write_text(json.dumps({"generations": self.generations}, indent=2), encoding="utf-8")
+        payload = {"generations": self.generations}
+        if extra_payload:
+            payload.update(extra_payload)
+        out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         for stream_name, rows in self.streams.items():
             stream_path = self.run_dir / f"{stream_name}.jsonl"
             with stream_path.open("w", encoding="utf-8") as handle:

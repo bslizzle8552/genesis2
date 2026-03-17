@@ -5,6 +5,7 @@ import json
 
 from src.engine.experiments import run_anti_dominance_experiments, run_experiment_batch, run_targeted_tuning
 from src.engine.simulation import SimulationEngine, load_config
+from src.tuner import run_tuning_orchestrator
 
 
 def main() -> None:
@@ -13,6 +14,7 @@ def main() -> None:
     parser.add_argument("--experiment-config", default=None)
     parser.add_argument("--anti-dominance-config", default=None)
     parser.add_argument("--tuning-config", default=None)
+    parser.add_argument("--tuner-config", default=None)
     args = parser.parse_args()
 
     if args.experiment_config:
@@ -27,6 +29,11 @@ def main() -> None:
 
     if args.tuning_config:
         result = run_targeted_tuning(args.tuning_config)
+        print(json.dumps(result, indent=2))
+        return
+
+    if args.tuner_config:
+        result = run_tuning_orchestrator(args.tuner_config)
         print(json.dumps(result, indent=2))
         return
 

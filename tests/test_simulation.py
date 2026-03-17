@@ -8,7 +8,7 @@ def test_simulation_runs_and_logs(tmp_path):
 
     assert result["final_population"] >= 0
     assert len(result["timeline"]) >= 1
-    assert (tmp_path / "run_seed1_g5" / "summary.json").exists()
+    assert (tmp_path / "run_seed1_g5_default" / "summary.json").exists()
 
 
 def test_agents_have_genomes_after_run(tmp_path):
@@ -61,3 +61,12 @@ def test_observability_report_contains_required_sections(tmp_path):
     assert "births_by_role" in obs["reproduction"]
     assert "births_by_lineage" in obs["reproduction"]
     assert "births_per_agent" in obs["reproduction"]
+
+
+def test_jsonl_metric_streams_are_emitted(tmp_path):
+    cfg = SimulationConfig(seed=9, agents=6, generations=4, tasks_per_generation=3, log_dir=str(tmp_path))
+    result = SimulationEngine(cfg).run()
+    run_dir = Path(result["summary_path"]).parent
+    for name in ["generation_metrics.jsonl", "lineage_metrics.jsonl", "role_metrics.jsonl", "problem_metrics.jsonl"]:
+        assert (run_dir / name).exists()
+

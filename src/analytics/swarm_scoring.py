@@ -17,6 +17,11 @@ class HealthySwarmWeights:
 
 @dataclass
 class HealthySwarmGates:
+    min_start_population: float = 20.0
+    max_start_population: float = 30.0
+    max_target_reach_generation: int = 80
+    min_target_band_fraction: float = 0.55
+    max_population_volatility: float = 20.0
     min_late_avg_population: float = 60.0
     max_top_lineage_share: float = 0.60
     max_top3_lineage_share: float = 0.85
@@ -29,6 +34,9 @@ class HealthySwarmGates:
 class HealthySwarmScoringConfig:
     target_population: float = 100.0
     target_population_tolerance: float = 20.0
+    target_band_min: float = 90.0
+    target_band_max: float = 110.0
+    target_reach_generation: int = 80
     late_window_fraction: float = 0.25
     collapse_population_threshold: int = 25
     weights: HealthySwarmWeights = field(default_factory=HealthySwarmWeights)
@@ -54,17 +62,30 @@ class HealthySwarmScorer:
             return 0.0, {"reason": "no_timeline"}
         late = self._late(timeline)
         pops = [float(row.get("population", 0)) for row in timeline]
+        first_population = pops[0] if pops else 0.0
         late_pops = [float(row.get("population", 0)) for row in late]
         late_avg = mean(late_pops)
         late_std = pstdev(late_pops) if len(late_pops) > 1 else 0.0
+        band_min = min(self.config.target_band_min, self.config.target_band_max)
+        band_max = max(self.config.target_band_min, self.config.target_band_max)
         target = self.config.target_population
         tol = max(1e-9, self.config.target_population_tolerance)
         closeness = self._clamp01(1.0 - abs(late_avg - target) / tol)
         volatility = self._clamp01(1.0 - (late_std / max(1.0, target * 0.35)))
+        band_fraction = sum(1 for p in late_pops if band_min <= p <= band_max) / max(1, len(late_pops))
+        start_score = self._clamp01(1.0 - (abs(first_population - 25.0) / 10.0))
+        reach_generation = next((idx for idx, p in enumerate(pops) if band_min <= p <= band_max), len(pops))
+        reach_score = self._clamp01(1.0 - (max(0, reach_generation - self.config.target_reach_generation) / max(1.0, self.config.target_reach_generation)))
         collapse_count = sum(1 for p in pops if p < self.config.collapse_population_threshold)
         collapse_penalty = self._clamp01(1.0 - (collapse_count / max(1, len(pops))))
-        score = (0.5 * closeness) + (0.3 * volatility) + (0.2 * collapse_penalty)
+        score = (0.25 * closeness) + (0.2 * volatility) + (0.2 * collapse_penalty) + (0.2 * band_fraction) + (0.1 * start_score) + (0.05 * reach_score)
         return self._clamp01(score), {
+            "start_population": round(first_population, 4),
+            "target_band_min": band_min,
+            "target_band_max": band_max,
+            "target_reach_generation": self.config.target_reach_generation,
+            "generation_reached_target_band": int(reach_generation),
+            "late_target_band_fraction": round(band_fraction, 4),
             "late_avg_population": round(late_avg, 4),
             "late_population_std": round(late_std, 4),
             "collapse_generations": collapse_count,
@@ -173,6 +194,10 @@ class HealthySwarmScorer:
 
         gates = self.config.gates
         gate_results = {
+            "start_population_ok": gates.min_start_population <= pop_metrics.get("start_population", 0.0) <= gates.max_start_population,
+            "target_reach_generation_ok": pop_metrics.get("generation_reached_target_band", len(timeline) + 1) <= gates.max_target_reach_generation,
+            "target_band_stability_ok": pop_metrics.get("late_target_band_fraction", 0.0) >= gates.min_target_band_fraction,
+            "population_volatility_ok": pop_metrics.get("late_population_std", 999.0) <= gates.max_population_volatility,
             "late_population_ok": pop_metrics.get("late_avg_population", 0.0) >= gates.min_late_avg_population,
             "top_lineage_share_ok": dom_metrics.get("late_top_lineage_share", 1.0) <= gates.max_top_lineage_share,
             "top3_lineage_share_ok": dom_metrics.get("late_top3_lineage_share", 1.0) <= gates.max_top3_lineage_share,

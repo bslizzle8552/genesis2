@@ -54,3 +54,21 @@ Each harness run now writes:
 - `config_aggregates.json` (mean/std/min/max score by config)
 - `leaderboard.json` (ranked configs)
 - `healthy_swarm_score.json` inside each run directory
+
+
+## Dist. Intelligence Ready - Stable tuning preset
+
+Run the built-in ecological readiness tuner (growth to ~100 by gen ~80, then stable band persistence):
+
+```bash
+python -m src.main --tuning-config config/tuning_dist_intelligence_ready_stable.json
+```
+
+Tune controls in that JSON file:
+- `search.timeout_seconds`
+- `search.search_budget`
+- `search.target_qualifying_configs`
+
+The run stops when timeout is reached or enough qualifying configs are harvested. Outputs include:
+- `runs_detailed.json`, `config_aggregates.json`, `leaderboard.json`
+- `harvested_stable_swarms_registry.json` (qualifying config registry + goal conditions)

@@ -25,3 +25,4 @@ def test_swarm_scoring_generates_components(tmp_path):
         "efficiency",
     }
     assert "gates" in score
+    assert {"start_population_ok", "target_reach_generation_ok", "target_band_stability_ok", "population_volatility_ok"}.issubset(set(score["gates"]))

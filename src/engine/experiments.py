@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from statistics import mean, pstdev
 from typing import Any, Dict, List
+import time
 
 from src.analytics.swarm_scoring import scorer_from_dict
 from src.engine.simulation import SimulationConfig, SimulationEngine
@@ -36,6 +37,226 @@ SWEEP_KEYS = [
     "child_energy_fraction",
 ]
 
+
+
+
+TARGET_TUNING_PRESETS: Dict[str, Dict[str, Any]] = {
+    "dist_intelligence_ready_stable": {
+        "id": "dist_intelligence_ready_stable",
+        "label": "Dist. Intelligence Ready - Stable",
+        "description": "Ecological maturity target before distributed intelligence rollout.",
+        "evaluation_horizon": 100,
+        "start_agents": 25,
+        "target_population": 100,
+        "target_reach_generation": 80,
+        "target_population_band": [90, 110],
+        "scoring": {
+            "target_population": 100,
+            "target_population_tolerance": 20,
+            "target_band_min": 90,
+            "target_band_max": 110,
+            "target_reach_generation": 80,
+            "gates": {
+                "min_start_population": 20,
+                "max_start_population": 30,
+                "max_target_reach_generation": 85,
+                "min_target_band_fraction": 0.55,
+                "max_population_volatility": 18.0,
+                "min_late_avg_population": 90,
+                "max_top_lineage_share": 0.58,
+                "max_top3_lineage_share": 0.86,
+                "min_late_lineage_count": 4,
+                "min_late_births": 8,
+                "min_solve_rate": 0.2,
+            },
+        },
+        "defaults": {
+            "timeout_seconds": 600,
+            "search_budget": 64,
+            "target_qualifying_configs": 3,
+            "trials_per_config": 3,
+            "minimum_pass_rate": 0.67,
+            "minimum_composite_score": 70.0,
+        },
+        "base": {
+            "seed": 42,
+            "agents": 25,
+            "generations": 100,
+            "initial_energy": 100,
+            "upkeep_cost": 6,
+            "tasks_per_generation": 35,
+            "reproduction_threshold": 130,
+            "mutation_rate": 0.2,
+            "diversity_bonus": 0.175,
+            "diversity_min_lineages": 8,
+            "immigrant_injection_count": 4,
+            "anti_dominance_enabled": True,
+            "tier_mix": {"1": 0.34, "2": 0.31, "3": 0.21, "4": 0.14},
+        },
+        "sweep": {
+            "diminishing_reward_enabled": [True],
+            "lineage_size_penalty_enabled": [True],
+            "lineage_energy_share_penalty_enabled": [False, True],
+            "reproduction_cooldown_enabled": [False, True],
+            "tasks_per_generation": [30, 35, 40],
+            "mutation_rate": [0.16, 0.2, 0.24],
+            "upkeep_cost": [5, 6],
+            "reproduction_threshold": [120, 130, 140],
+            "lineage_size_penalty_threshold": [40, 50],
+        },
+    }
+}
+
+
+def _merge_nested_dict(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_nested_dict(dict(merged[key]), value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _resolve_target_preset(spec: Dict[str, Any]) -> Dict[str, Any]:
+    preset_id = str(spec.get("target_preset", "dist_intelligence_ready_stable"))
+    if preset_id not in TARGET_TUNING_PRESETS:
+        raise ValueError(f"unknown target preset: {preset_id}")
+    preset = TARGET_TUNING_PRESETS[preset_id]
+    return {
+        "id": preset["id"],
+        "label": preset["label"],
+        "description": preset["description"],
+        "evaluation_horizon": spec.get("evaluation_horizon", preset["evaluation_horizon"]),
+        "target_population": preset["target_population"],
+        "target_reach_generation": preset["target_reach_generation"],
+        "target_population_band": preset["target_population_band"],
+        "scoring": _merge_nested_dict(dict(preset["scoring"]), dict(spec.get("scoring_overrides", {}))),
+        "defaults": _merge_nested_dict(dict(preset["defaults"]), dict(spec.get("search", {}))),
+        "base": _merge_nested_dict(dict(preset["base"]), dict(spec.get("base", {}))),
+        "sweep": _merge_nested_dict(dict(preset["sweep"]), dict(spec.get("sweep", {}))),
+    }
+
+
+def run_targeted_tuning(config_path: str | Path) -> Dict[str, Any]:
+    spec = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    preset = _resolve_target_preset(spec)
+
+    output_root = Path(spec.get("output_root", "runs/experiments"))
+    experiment_id = spec.get("experiment_id", f"{preset['id']}_tuning")
+    defaults = preset["defaults"]
+    timeout_seconds = float(defaults.get("timeout_seconds", 600))
+    search_budget = int(defaults.get("search_budget", 64))
+    target_qualifying = max(1, int(defaults.get("target_qualifying_configs", 3)))
+    trials_per_config = max(1, int(defaults.get("trials_per_config", 3)))
+    minimum_pass_rate = float(defaults.get("minimum_pass_rate", 0.67))
+    minimum_composite_score = float(defaults.get("minimum_composite_score", 70.0))
+
+    base = dict(preset["base"])
+    base["generations"] = int(spec.get("evaluation_horizon", preset["evaluation_horizon"]))
+    sweep = dict(preset["sweep"])
+
+    sweep_items = [(k, _as_list(v)) for k, v in sweep.items() if k in SWEEP_KEYS]
+    if not sweep_items:
+        sweep_items = [("seed", _as_list(base.get("seed", 42)))]
+    keys = [k for k, _ in sweep_items]
+    combinations = list(itertools.product(*[vals for _, vals in sweep_items]))[:search_budget]
+
+    scorer = scorer_from_dict(preset["scoring"])
+    start_time = time.monotonic()
+    comparisons: List[Dict[str, Any]] = []
+    harvested: List[Dict[str, Any]] = []
+
+    for idx, combo in enumerate(combinations, start=1):
+        if time.monotonic() - start_time >= timeout_seconds:
+            break
+
+        params = dict(base)
+        params.update(dict(zip(keys, combo)))
+        params.setdefault("log_dir", str(output_root))
+        params["experiment_id"] = experiment_id
+        base_seed = int(params.get("seed", 42))
+
+        trial_rows: List[Dict[str, Any]] = []
+        for trial in range(1, trials_per_config + 1):
+            if time.monotonic() - start_time >= timeout_seconds:
+                break
+            params["seed"] = base_seed + trial - 1
+            params["run_label"] = f"{experiment_id}_{idx}_t{trial}"
+            cfg = SimulationConfig(**params)
+            result = SimulationEngine(cfg).run()
+            run_score = scorer.score_run(result)
+            row = _build_comparison_row(cfg, result, run_score)
+            row["trial"] = trial
+            row["config_index"] = idx
+            row["config_group"] = _normalize_config_for_grouping(params)
+            row["healthy_swarm_score_path"] = _persist_scoring_summary(result, row)
+            comparisons.append(row)
+            trial_rows.append(row)
+
+        if not trial_rows:
+            continue
+
+        aggregate = _aggregate_trial_rows(trial_rows)
+        qualifies = aggregate["pass_rate"] >= minimum_pass_rate and aggregate["score_mean"] >= minimum_composite_score
+        if qualifies:
+            harvested.append({
+                "config": trial_rows[0]["config_group"],
+                "aggregate": aggregate,
+                "trial_run_dirs": [r.get("run_dir") for r in trial_rows],
+            })
+            if len(harvested) >= target_qualifying:
+                break
+
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for row in comparisons:
+        key = json.dumps(row["config_group"], sort_keys=True)
+        grouped.setdefault(key, {"config": row["config_group"], "trials": []})["trials"].append(row)
+
+    aggregate_rows: List[Dict[str, Any]] = []
+    for item in grouped.values():
+        aggregate_rows.append({"config": item["config"], "aggregate": _aggregate_trial_rows(item["trials"]), "trials": item["trials"]})
+
+    output_dir = output_root / experiment_id
+    out_files = _write_experiment_outputs(output_dir, experiment_id, comparisons, aggregate_rows)
+
+    harvest_registry = output_dir / "harvested_stable_swarms_registry.json"
+    harvest_registry.write_text(json.dumps({
+        "experiment_id": experiment_id,
+        "target_preset": preset["id"],
+        "target_label": preset["label"],
+        "goal_conditions": {
+            "start_agents": preset["base"].get("agents"),
+            "target_population": preset["target_population"],
+            "target_reach_generation": preset["target_reach_generation"],
+            "target_population_band": preset["target_population_band"],
+            "evaluation_horizon": base["generations"],
+            "gates": preset["scoring"].get("gates", {}),
+            "minimum_pass_rate": minimum_pass_rate,
+            "minimum_composite_score": minimum_composite_score,
+        },
+        "search_controls": {
+            "timeout_seconds": timeout_seconds,
+            "search_budget": search_budget,
+            "target_qualifying_configs": target_qualifying,
+            "trials_per_config": trials_per_config,
+        },
+        "harvested_configs": harvested,
+    }, indent=2), encoding="utf-8")
+
+    elapsed = time.monotonic() - start_time
+    return {
+        "experiment_id": experiment_id,
+        "target_profile": preset,
+        "elapsed_seconds": round(elapsed, 3),
+        "searched_config_count": len(grouped),
+        "qualifying_config_count": len(harvested),
+        "stopped_reason": "target_qualifying_configs_reached" if len(harvested) >= target_qualifying else ("timeout" if elapsed >= timeout_seconds else "search_budget_exhausted"),
+        "runs": comparisons,
+        "aggregates": aggregate_rows,
+        "reports": out_files,
+        "harvest_registry": str(harvest_registry),
+    }
 
 def _as_list(value: Any) -> List[Any]:
     if isinstance(value, list):

@@ -1,0 +1,22 @@
+{
+  "experiment_id": "dist_intelligence_ready_stable_search",
+  "target_preset": "dist_intelligence_ready_stable",
+  "output_root": "runs/experiments",
+  "evaluation_horizon": 100,
+  "search": {
+    "timeout_seconds": 600,
+    "search_budget": 64,
+    "target_qualifying_configs": 3,
+    "trials_per_config": 3,
+    "minimum_pass_rate": 0.67,
+    "minimum_composite_score": 70.0
+  },
+  "base": {
+    "agents": 25,
+    "generations": 100
+  },
+  "sweep": {
+    "tasks_per_generation": [30, 35, 40],
+    "mutation_rate": [0.16, 0.2, 0.24]
+  }
+}

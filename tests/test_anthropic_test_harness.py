@@ -76,6 +76,15 @@ def test_run_harness_writes_report_and_followup(tmp_path, monkeypatch):
     assert result["stop_reason"] in {"target_met:healthy", "failure_label:failed_collapse"}
     report_path = Path(result["report_path"])
     assert report_path.exists()
-    assert "Anthropic Tuning Harness Report" in report_path.read_text(encoding="utf-8")
+    report_text = report_path.read_text(encoding="utf-8")
+    assert "Anthropic Tuning Harness Report" in report_text
+    assert "## Run results table" in report_text
+    assert "| Run | Cycle | Score | Label | Final Pop | Lineages | Diversity | Diagnosis |" in report_text
+
+    run_results_csv = report_path.parent / "run_results.csv"
+    assert run_results_csv.exists()
+    csv_text = run_results_csv.read_text(encoding="utf-8")
+    assert "run_index,cycle,score,label,final_population,lineage_count,diversity_score,diagnosis" in csv_text
+
     session_output = report_path.parent / "session_output.json"
     assert session_output.exists()

@@ -125,6 +125,17 @@ def _stop_reason(goal: Dict[str, Any], metrics: Dict[str, Any], result: Dict[str
 
 
 def _report_markdown(run_events: List[Dict[str, Any]], goal: Dict[str, Any], stop_reason: str, recommendation_notes: List[str]) -> str:
+    if run_events:
+        best = max(run_events, key=lambda event: float(event["metrics"].get("score", 0.0)))
+        best_metrics = best["metrics"]
+        score_history = [float(event["metrics"].get("score", 0.0)) for event in run_events]
+        score_delta = score_history[-1] - score_history[0]
+    else:
+        best = None
+        best_metrics = {}
+        score_history = []
+        score_delta = 0.0
+
     lines = [
         "# Anthropic Tuning Harness Report",
         "",
@@ -132,8 +143,41 @@ def _report_markdown(run_events: List[Dict[str, Any]], goal: Dict[str, Any], sto
         f"Goal target_label: `{goal.get('target_label')}`",
         f"Stop reason: `{stop_reason}`",
         "",
-        "## Run log",
+        "## Session summary",
+        "",
+        f"- Total runs: **{len(run_events)}**",
+        f"- Score trend (first→last): **{score_history[0]:.2f} → {score_history[-1]:.2f}** (Δ {score_delta:+.2f})" if score_history else "- Score trend (first→last): n/a",
+        (
+            f"- Best run: **Run {best['run_index']}** with score **{best_metrics.get('score', 0.0):.2f}** and label `{best_metrics.get('label', 'unknown')}`"
+            if best
+            else "- Best run: n/a"
+        ),
+        "",
+        "## Run results table",
+        "",
+        "| Run | Cycle | Score | Label | Final Pop | Lineages | Diversity | Diagnosis |",
+        "|---:|---:|---:|---|---:|---:|---:|---|",
     ]
+    for event in run_events:
+        metrics = event["metrics"]
+        diagnosis = ", ".join(metrics.get("diagnosis", [])) or "none"
+        lines.append(
+            "| {run_index} | {cycle} | {score:.2f} | `{label}` | {final_population} | {lineage_count} | {diversity_score:.3f} | {diagnosis} |".format(
+                run_index=event["run_index"],
+                cycle=event["cycle"],
+                score=float(metrics.get("score", 0.0)),
+                label=metrics.get("label", "unknown"),
+                final_population=event["result"].get("final_population", 0),
+                lineage_count=metrics.get("lineage_count", 0),
+                diversity_score=float(metrics.get("diversity_score", 0.0)),
+                diagnosis=diagnosis,
+            )
+        )
+
+    lines.extend([
+        "",
+        "## Run log",
+    ])
     for event in run_events:
         lines.extend(
             [
@@ -144,6 +188,28 @@ def _report_markdown(run_events: List[Dict[str, Any]], goal: Dict[str, Any], sto
     if recommendation_notes:
         lines.extend(["", "## Recommendation clamp notes"] + [f"- {note}" for note in recommendation_notes])
     return "\n".join(lines)
+
+
+def _write_live_status(session_dir: Path, run_events: List[Dict[str, Any]]) -> None:
+    if not run_events:
+        return
+    csv_lines = ["run_index,cycle,score,label,final_population,lineage_count,diversity_score,diagnosis"]
+    for event in run_events:
+        metrics = event["metrics"]
+        diagnosis = "|".join(metrics.get("diagnosis", [])) or "none"
+        csv_lines.append(
+            "{run_index},{cycle},{score:.4f},{label},{final_population},{lineage_count},{diversity_score:.6f},{diagnosis}".format(
+                run_index=event["run_index"],
+                cycle=event["cycle"],
+                score=float(metrics.get("score", 0.0)),
+                label=metrics.get("label", "unknown"),
+                final_population=event["result"].get("final_population", 0),
+                lineage_count=metrics.get("lineage_count", 0),
+                diversity_score=float(metrics.get("diversity_score", 0.0)),
+                diagnosis=diagnosis,
+            )
+        )
+    (session_dir / "run_results.csv").write_text("\n".join(csv_lines) + "\n", encoding="utf-8")
 
 
 def run_harness(spec_path: Path) -> Dict[str, Any]:
@@ -213,6 +279,7 @@ def run_harness(spec_path: Path) -> Dict[str, Any]:
                 "metrics": metrics,
             }
             run_events.append(event)
+            _write_live_status(session_dir, run_events)
             reason = _stop_reason(goal, metrics, result)
             if reason:
                 last_stop_reason = reason

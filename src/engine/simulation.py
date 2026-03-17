@@ -8,7 +8,7 @@ from pathlib import Path
 import random
 import re
 from statistics import mean
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import uuid
 
 from src.agents.agent import Agent
@@ -16,6 +16,7 @@ from src.agents.genome import Genome
 from src.agents.reproduction import reproduce
 from src.analytics.logger import SimulationLogger, summarize_energy
 from src.analytics.metrics import detect_phase, gini, lineage_energy, percentile, role_energy, top_share
+from src.analytics.data_layer import EventDataLayer, RunDataReader, reconstruct_generation
 from src.world.board import WorldBoard
 from src.world.economy import COSTS, REWARDS
 from src.world.problems import DOMAINS, Problem, spawn_problems
@@ -59,6 +60,8 @@ class SimulationConfig:
     reproduction_cooldown_generations: int = 2
     reproduction_cost: float = 32.0
     child_energy_fraction: float = 0.5
+    visualization_snapshots_enabled: bool = True
+    visualization_snapshot_interval: int = 1
 
 
 class SimulationEngine:
@@ -1340,11 +1343,53 @@ class SimulationEngine:
             }
         raise FileExistsError("Unable to allocate unique run directory without overwrite")
 
+    @staticmethod
+    def iter_agents_per_generation(run_dir: str | Path, generation: int | None = None) -> Dict[int, List[Dict]]:
+        return RunDataReader(Path(run_dir)).iter_agents_per_generation(generation=generation)
+
+    @staticmethod
+    def lineage_groups(run_dir: str | Path, generation: int | None = None) -> Dict[int, Dict[str, List[Dict]]]:
+        return RunDataReader(Path(run_dir)).lineage_groups(generation=generation)
+
+    @staticmethod
+    def interactions(run_dir: str | Path, generation: int | None = None) -> Dict[int, List[Dict]]:
+        return RunDataReader(Path(run_dir)).interactions(generation=generation)
+
+    @staticmethod
+    def reconstruct_generation(run_dir: str | Path, generation: int) -> List[Dict]:
+        return reconstruct_generation(Path(run_dir), generation)
+
+    def _emit_event(
+        self,
+        data_layer: EventDataLayer,
+        event_type: str,
+        generation: int,
+        agent_ids: List[str] | None = None,
+        lineage_ids: List[str] | None = None,
+        energy_delta: float | None = None,
+        metadata: Dict[str, Any] | None = None,
+    ) -> None:
+        data_layer.emit_event(
+            {
+                "event_type": event_type,
+                "generation": generation,
+                "agent_ids": agent_ids or [],
+                "lineage_ids": lineage_ids or [],
+                "energy_delta": None if energy_delta is None else round(float(energy_delta), 6),
+                "metadata": metadata or {},
+            }
+        )
+
     def run(self, progress_callback=None) -> Dict:
         run_setup = self._create_run_dir()
         run_dir = run_setup["run_dir"]
         run_identity = run_setup["run_identity"]
         logger = SimulationLogger(run_dir)
+        data_layer = EventDataLayer(
+            run_dir,
+            snapshot_interval=self.config.visualization_snapshot_interval,
+            snapshots_enabled=self.config.visualization_snapshots_enabled,
+        )
         config_snapshot = asdict(self.config)
         (run_dir / "config.json").write_text(json.dumps(config_snapshot, indent=2), encoding="utf-8")
         snapshots: List[Dict] = []
@@ -1377,6 +1422,16 @@ class SimulationEngine:
         previous_lineages: set[str] = {a.lineage_id for a in self.agents}
         cumulative_lineage_extinctions = 0
 
+        for agent in self.agents:
+            self._emit_event(
+                data_layer,
+                "agent_created",
+                generation=0,
+                agent_ids=[agent.agent_id],
+                lineage_ids=[agent.lineage_id],
+                metadata={"source": "initial_population", "energy": round(agent.energy, 4)},
+            )
+
         for generation in range(1, self.config.generations + 1):
             births = deaths = artifact_reuse = artifact_created = solved = verified = subtasks = 0
             critiques = decompositions = integrations = 0
@@ -1405,6 +1460,14 @@ class SimulationEngine:
             for problem in board.problems:
                 tier_total[str(problem.tier)] += 1
                 domain_total[problem.domain] += 1
+                self._emit_event(
+                    data_layer,
+                    "problem_spawned",
+                    generation=generation,
+                    agent_ids=[],
+                    lineage_ids=[],
+                    metadata={"problem_id": problem.problem_id, "tier": problem.tier, "domain": problem.domain},
+                )
 
             current_lineages = len({a.lineage_id for a in self.agents})
             if current_lineages >= self.config.diversity_min_lineages and self.config.diversity_bonus > 0:
@@ -1497,6 +1560,39 @@ class SimulationEngine:
                     self.agent_contributions[agent.agent_id]["solves"] += 1
                     best.contribution_chain.append({"generation": str(generation), "agent_id": agent.agent_id, "type": "solve", "detail": f"{agent.agent_id} provided accepted solve"})
                     best.reward_split[agent.agent_id] = round(REWARDS["correct_solution"], 2)
+                    if contributors:
+                        contributor_agent_ids = [c["agent"].agent_id for c in contributors]
+                        contributor_lineages = [c["agent"].lineage_id for c in contributors]
+                        self._emit_event(
+                            data_layer,
+                            "collaboration_event",
+                            generation=generation,
+                            agent_ids=[agent.agent_id, *contributor_agent_ids],
+                            lineage_ids=[agent.lineage_id, *contributor_lineages],
+                            metadata={"problem_id": best.problem_id, "tier": best.tier, "domain": best.domain, "kind": "support_contributors"},
+                        )
+                    self._emit_event(
+                        data_layer,
+                        "problem_solved",
+                        generation=generation,
+                        agent_ids=[agent.agent_id],
+                        lineage_ids=[agent.lineage_id],
+                        metadata={
+                            "problem_id": best.problem_id,
+                            "tier": best.tier,
+                            "domain": best.domain,
+                            "resolution_mode": best.resolution_mode,
+                        },
+                    )
+                    self._emit_event(
+                        data_layer,
+                        "reward_distributed",
+                        generation=generation,
+                        agent_ids=[agent.agent_id],
+                        lineage_ids=[agent.lineage_id],
+                        energy_delta=REWARDS["correct_solution"],
+                        metadata={"reason": "correct_solution", "problem_id": best.problem_id},
+                    )
 
                     # Optional collaboration: a second contributor can verify/assist on harder tiers.
                     collaborators = [a for a in self.agents if a.agent_id != agent.agent_id]
@@ -1518,6 +1614,14 @@ class SimulationEngine:
                             }
                         )
                         helper.energy += helper_share
+                        self._emit_event(
+                            data_layer,
+                            "collaboration_event",
+                            generation=generation,
+                            agent_ids=[agent.agent_id, helper.agent_id],
+                            lineage_ids=[agent.lineage_id, helper.lineage_id],
+                            metadata={"problem_id": best.problem_id, "tier": best.tier, "domain": best.domain},
+                        )
 
                     board_events.append(
                         {
@@ -1556,6 +1660,15 @@ class SimulationEngine:
                             )
                             best.reward_split[verifier.agent_id] = round(
                                 best.reward_split.get(verifier.agent_id, 0.0) + REWARDS["successful_verification"], 2
+                            )
+                            self._emit_event(
+                                data_layer,
+                                "reward_distributed",
+                                generation=generation,
+                                agent_ids=[verifier.agent_id],
+                                lineage_ids=[verifier.lineage_id],
+                                energy_delta=REWARDS["successful_verification"],
+                                metadata={"reason": "successful_verification", "problem_id": best.problem_id},
                             )
                             board_events.append(
                                 {
@@ -1681,6 +1794,27 @@ class SimulationEngine:
                     self.role_reproduction_counts[role] += 1
                     births += 1
                     births_by_agent[agent.agent_id] += 1
+                    self._emit_event(
+                        data_layer,
+                        "agent_reproduced",
+                        generation=generation,
+                        agent_ids=[agent.agent_id, child.agent_id],
+                        lineage_ids=[agent.lineage_id, child.lineage_id],
+                        energy_delta=round(parent_energy_after - parent_energy_before, 4),
+                        metadata={
+                            "parent_energy_before": parent_energy_before,
+                            "parent_energy_after": parent_energy_after,
+                            "child_start_energy": round(child.energy, 4),
+                        },
+                    )
+                    self._emit_event(
+                        data_layer,
+                        "agent_created",
+                        generation=generation,
+                        agent_ids=[child.agent_id],
+                        lineage_ids=[child.lineage_id],
+                        metadata={"source": "reproduction", "parent_id": agent.agent_id, "energy": round(child.energy, 4)},
+                    )
                     board_events.append(
                         {
                             "generation": generation,
@@ -1699,6 +1833,14 @@ class SimulationEngine:
                     survivors.append(agent)
                 else:
                     deaths += 1
+                    self._emit_event(
+                        data_layer,
+                        "agent_died",
+                        generation=generation,
+                        agent_ids=[agent.agent_id],
+                        lineage_ids=[agent.lineage_id],
+                        metadata={"reason": "energy_depleted", "energy": round(agent.energy, 4)},
+                    )
                     board_events.append(
                         {
                             "generation": generation,
@@ -1718,6 +1860,15 @@ class SimulationEngine:
                 if injected:
                     births += injected
                     totals["diversity_injected"] += injected
+                    for injected_agent in self.agents[-injected:]:
+                        self._emit_event(
+                            data_layer,
+                            "agent_created",
+                            generation=generation,
+                            agent_ids=[injected_agent.agent_id],
+                            lineage_ids=[injected_agent.lineage_id],
+                            metadata={"source": "immigrant_injection", "energy": round(injected_agent.energy, 4)},
+                        )
             lineages = Counter(a.lineage_id for a in self.agents)
             energies = [a.energy for a in self.agents]
             roles = Counter(a.choose_role() for a in self.agents)
@@ -1949,6 +2100,8 @@ class SimulationEngine:
             }
             logger.log_generation(generation_log)
             snapshots.append(generation_log)
+            data_layer.write_generation_snapshot(generation, current_agents)
+            data_layer.write_generation_projections(generation, current_agents)
 
             if progress_callback:
                 progress_callback(generation_log)
@@ -2031,6 +2184,14 @@ class SimulationEngine:
             "observability_exports": {
                 "manifest_path": str(run_dir / "observability_manifest.json"),
                 "files": manifest.get("observability_files", []),
+            },
+            "data_layer": {
+                "events_path": str(run_dir / "events" / "events.jsonl"),
+                "energy_metrics_path": str(run_dir / "events" / "energy_metrics.jsonl"),
+                "dominance_metrics_path": str(run_dir / "events" / "dominance_metrics.jsonl"),
+                "reproduction_metrics_path": str(run_dir / "events" / "reproduction_metrics.jsonl"),
+                "visualization_snapshot_path": str(run_dir / "visualization" / "agent_states_per_generation.jsonl"),
+                "final_generation_reconstruction_count": len(reconstruct_generation(run_dir, snapshots[-1]["generation"] if snapshots else 0)),
             },
             "problems": [
                 {

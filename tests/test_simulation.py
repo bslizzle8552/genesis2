@@ -165,3 +165,39 @@ def test_generation_log_tracks_anti_dominance_logging(tmp_path):
     assert "births_blocked_by_cooldown" in latest
     assert "reward_multiplier_stats" in latest
     assert "applied" in latest["reward_multiplier_stats"]
+
+
+def test_event_data_layer_outputs_are_emitted(tmp_path):
+    cfg = SimulationConfig(seed=31, agents=6, generations=4, tasks_per_generation=3, log_dir=str(tmp_path))
+    result = SimulationEngine(cfg).run()
+    run_dir = Path(result["summary_path"]).parent
+
+    assert (run_dir / "events" / "events.jsonl").exists()
+    assert (run_dir / "events" / "energy_metrics.jsonl").exists()
+    assert (run_dir / "events" / "dominance_metrics.jsonl").exists()
+    assert (run_dir / "events" / "reproduction_metrics.jsonl").exists()
+    assert (run_dir / "visualization" / "agent_states_per_generation.jsonl").exists()
+
+    event_lines = [line for line in (run_dir / "events" / "events.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert event_lines
+    event_types = {json.loads(line).get("event_type") for line in event_lines}
+    for required in ["agent_created", "problem_spawned", "problem_solved", "reward_distributed"]:
+        assert required in event_types
+
+
+def test_replay_and_visualization_hooks(tmp_path):
+    cfg = SimulationConfig(seed=33, agents=8, generations=5, tasks_per_generation=4, log_dir=str(tmp_path))
+    result = SimulationEngine(cfg).run()
+    run_dir = Path(result["summary_path"]).parent
+
+    grouped = SimulationEngine.iter_agents_per_generation(run_dir)
+    assert grouped
+    first_gen = min(grouped.keys())
+    by_lineage = SimulationEngine.lineage_groups(run_dir, generation=first_gen)
+    assert first_gen in by_lineage
+
+    interactions = SimulationEngine.interactions(run_dir, generation=first_gen)
+    assert isinstance(interactions, dict)
+
+    reconstructed = SimulationEngine.reconstruct_generation(run_dir, first_gen)
+    assert isinstance(reconstructed, list)

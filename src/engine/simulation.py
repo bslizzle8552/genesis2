@@ -1823,7 +1823,7 @@ class SimulationEngine:
             agent["workflow"] = agent["genome"].get("workflows", {})
 
         report = self._build_report(snapshots, all_problems, totals, agents_snapshot)
-        run_dir = run_root / run_name
+        run_name = run_identity["run_id"]
         observability_exports = self._build_observability_exports(
             run_name=run_name,
             timeline=snapshots,

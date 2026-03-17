@@ -74,3 +74,20 @@ def test_config_from_request_supports_anti_dominance_controls():
     assert cfg.reproduction_cooldown_generations == 3
     assert cfg.reproduction_cost == 36.0
     assert cfg.child_energy_fraction == 0.4
+
+
+def test_discover_presets_exposes_anti_dominance_ui_fields():
+    presets = discover_presets()
+    fast = next(p for p in presets if p["id"] == "experiment_fast.json")
+    for key in [
+        "anti_dominance_enabled",
+        "diminishing_reward_enabled",
+        "diminishing_reward_k",
+        "lineage_size_penalty_enabled",
+        "lineage_size_penalty_threshold",
+        "lineage_size_penalty_multiplier",
+        "reproduction_cooldown_enabled",
+        "reproduction_cooldown_generations",
+        "child_energy_fraction",
+    ]:
+        assert key in fast

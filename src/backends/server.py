@@ -52,6 +52,15 @@ def discover_presets() -> List[Dict[str, object]]:
                 "diversity_min_lineages": cfg.get("diversity_min_lineages", 4),
                 "immigrant_injection_count": cfg.get("immigrant_injection_count", 2),
                 "tier_mix": cfg.get("tier_mix", {"1": 0.34, "2": 0.31, "3": 0.21, "4": 0.14}),
+                "anti_dominance_enabled": cfg.get("anti_dominance_enabled", False),
+                "diminishing_reward_enabled": cfg.get("diminishing_reward_enabled", False),
+                "diminishing_reward_k": cfg.get("diminishing_reward_k", 250.0),
+                "lineage_size_penalty_enabled": cfg.get("lineage_size_penalty_enabled", False),
+                "lineage_size_penalty_threshold": cfg.get("lineage_size_penalty_threshold", 45),
+                "lineage_size_penalty_multiplier": cfg.get("lineage_size_penalty_multiplier", 0.85),
+                "reproduction_cooldown_enabled": cfg.get("reproduction_cooldown_enabled", False),
+                "reproduction_cooldown_generations": cfg.get("reproduction_cooldown_generations", 2),
+                "child_energy_fraction": cfg.get("child_energy_fraction", 0.5),
             }
         )
 
@@ -73,6 +82,15 @@ def discover_presets() -> List[Dict[str, object]]:
                 "diversity_min_lineages": 4,
                 "immigrant_injection_count": 2,
                 "tier_mix": {"1": 0.34, "2": 0.31, "3": 0.21, "4": 0.14},
+                "anti_dominance_enabled": False,
+                "diminishing_reward_enabled": False,
+                "diminishing_reward_k": 250.0,
+                "lineage_size_penalty_enabled": False,
+                "lineage_size_penalty_threshold": 45,
+                "lineage_size_penalty_multiplier": 0.85,
+                "reproduction_cooldown_enabled": False,
+                "reproduction_cooldown_generations": 2,
+                "child_energy_fraction": 0.5,
             },
         )
 

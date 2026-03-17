@@ -37,6 +37,69 @@ def gini(values: Sequence[float]) -> float:
     return round((2.0 * weighted) / (n * total) - (n + 1) / n, 6)
 
 
+def safe_ratio(numerator: float, denominator: float) -> float:
+    return round(float(numerator) / max(1e-9, float(denominator)), 6)
+
+
+def energy_distribution_metrics(values: Sequence[float]) -> Dict[str, float]:
+    if not values:
+        return {
+            "min": 0.0,
+            "median": 0.0,
+            "mean": 0.0,
+            "p90": 0.0,
+            "p99": 0.0,
+            "max": 0.0,
+            "gini": 0.0,
+            "p99_median_ratio": 0.0,
+            "mean_median_ratio": 0.0,
+        }
+    min_energy = float(min(values))
+    median_energy = percentile(values, 0.5)
+    mean_energy = float(mean(values))
+    p90_energy = percentile(values, 0.9)
+    p99_energy = percentile(values, 0.99)
+    max_energy = float(max(values))
+    return {
+        "min": round(min_energy, 6),
+        "median": round(median_energy, 6),
+        "mean": round(mean_energy, 6),
+        "p90": round(p90_energy, 6),
+        "p99": round(p99_energy, 6),
+        "max": round(max_energy, 6),
+        "gini": gini(values),
+        "p99_median_ratio": safe_ratio(p99_energy, median_energy),
+        "mean_median_ratio": safe_ratio(mean_energy, median_energy),
+    }
+
+
+def dominance_pressure_index(
+    top_lineage_share: float,
+    top3_lineage_share: float,
+    gini_value: float,
+    reproduction_concentration: float,
+    weights: Dict[str, float] | None = None,
+) -> float:
+    coeffs = {
+        "top_lineage_share": 0.35,
+        "top3_lineage_share": 0.25,
+        "gini": 0.20,
+        "reproduction_concentration": 0.20,
+    }
+    if weights:
+        coeffs.update(weights)
+    total_weight = sum(max(0.0, w) for w in coeffs.values())
+    if total_weight <= 0:
+        return 0.0
+    score = (
+        max(0.0, min(1.0, float(top_lineage_share))) * coeffs["top_lineage_share"]
+        + max(0.0, min(1.0, float(top3_lineage_share))) * coeffs["top3_lineage_share"]
+        + max(0.0, min(1.0, float(gini_value))) * coeffs["gini"]
+        + max(0.0, min(1.0, float(reproduction_concentration))) * coeffs["reproduction_concentration"]
+    )
+    return round(max(0.0, min(1.0, score / total_weight)), 6)
+
+
 def lineage_energy(agents: Iterable[Dict]) -> Dict[str, float]:
     totals: Counter[str] = Counter()
     for agent in agents:

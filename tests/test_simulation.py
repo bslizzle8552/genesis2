@@ -70,7 +70,16 @@ def test_jsonl_metric_streams_are_emitted(tmp_path):
     cfg = SimulationConfig(seed=9, agents=6, generations=4, tasks_per_generation=3, log_dir=str(tmp_path))
     result = SimulationEngine(cfg).run()
     run_dir = Path(result["summary_path"]).parent
-    for name in ["generation_metrics.jsonl", "lineage_metrics.jsonl", "role_metrics.jsonl", "problem_metrics.jsonl"]:
+    for name in [
+        "generation_metrics.jsonl",
+        "energy_metrics.jsonl",
+        "dominance_metrics.jsonl",
+        "reproduction_metrics.jsonl",
+        "reward_capture_metrics.jsonl",
+        "lineage_metrics.jsonl",
+        "role_metrics.jsonl",
+        "problem_metrics.jsonl",
+    ]:
         assert (run_dir / name).exists()
 
 
@@ -92,6 +101,10 @@ def test_repeated_runs_use_unique_folders_and_manifest(tmp_path):
         "artifact_metrics.jsonl",
         "config.json",
         "generation_metrics.jsonl",
+        "energy_metrics.jsonl",
+        "dominance_metrics.jsonl",
+        "reproduction_metrics.jsonl",
+        "reward_capture_metrics.jsonl",
         "lineage_metrics.jsonl",
         "problem_metrics.jsonl",
         "role_metrics.jsonl",
@@ -148,14 +161,21 @@ def test_generation_metrics_include_dominance_fields(tmp_path):
         "top_lineage_energy_share",
         "top_3_lineage_energy_share",
         "energy_inequality_proxy",
+        "energy_p99_median_ratio",
+        "energy_mean_median_ratio",
         "births_from_top_lineage",
         "births_from_top_3_lineages",
         "reproduction_concentration",
         "lineage_extinction_count",
+        "lineage_survival_count",
         "surviving_lineage_count",
         "reward_concentration_by_lineage",
+        "reward_share_top_10pct_agents",
+        "dominance_pressure_index",
+        "system_flags",
         "births_blocked_by_cooldown",
         "reward_multiplier_stats",
+        "energy_flow",
     ]:
         assert field in row
 
@@ -179,3 +199,15 @@ def test_generation_log_tracks_anti_dominance_logging(tmp_path):
     assert "births_blocked_by_cooldown" in latest
     assert "reward_multiplier_stats" in latest
     assert "applied" in latest["reward_multiplier_stats"]
+
+
+def test_dominance_energy_time_series_exports(tmp_path):
+    cfg = SimulationConfig(seed=34, agents=8, generations=5, tasks_per_generation=4, log_dir=str(tmp_path))
+    result = SimulationEngine(cfg).run()
+    latest = result["timeline"][-1]
+
+    assert "dominance_metrics" in latest
+    assert "reproduction_concentration_metrics" in latest
+    assert "reward_capture" in latest
+    assert "system_flags" in latest
+    assert "dominance_pressure_index" in latest["dominance_metrics"]

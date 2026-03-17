@@ -49,8 +49,8 @@
   <div class="card">
     <h2>1) Configure Run</h2>
     <div class="card tuning-card">
-      <h3>Tuning Modes</h3>
-      <p class="muted">Choose a goal and click <strong>Start Tuning</strong>. Manual presets are de-emphasized while tuning mode is active.</p>
+      <h3>Adaptive Tuning Rig</h3>
+      <p class="muted">Choose one goal-driven mode and click <strong>Start Tuning</strong>. Manual preset controls are de-emphasized while this rig is active.</p>
       <div class="tuning-options" id="tuningOptions">
         <label class="tuning-option active"><input type="radio" name="tuningMode" value="find_stable_swarm" checked> Find Stable Swarm (100 agents, 100 generations)</label>
         <label class="tuning-option disabled"><input type="radio" name="tuningMode" value="maximize_growth" disabled> Maximize Growth <span class="muted">(coming soon)</span></label>
@@ -62,19 +62,24 @@
         <div id="tuningStatus" class="muted">Idle</div>
       </div>
       <div class="grid2" style="margin-top:10px;">
-        <div class="kpi"><div class="muted">Best run so far</div><pre id="tuningBestRun">No runs yet.</pre></div>
-        <div class="kpi"><div class="muted">Current parameter set being tested</div><pre id="tuningCurrentParams">Not started.</pre></div>
+        <div class="kpi"><div class="muted">Live status</div><pre id="tuningLiveStatus">Idle.</pre></div>
+        <div class="kpi"><div class="muted">Current parameter set</div><pre id="tuningCurrentParams">Not started.</pre></div>
       </div>
       <div class="card" style="margin-top:10px;">
-        <h3>Score Progression</h3>
+        <h3>Run stream</h3>
         <pre id="tuningProgression">No scores yet.</pre>
       </div>
+      <div class="card" style="margin-top:10px;">
+        <h3>Best run so far</h3>
+        <pre id="tuningBestRun">No runs yet.</pre>
+      </div>
       <div id="tuningSuccessPanel" class="card tuning-success" style="display:none; margin-top:10px;">
-        <h3>Stable swarm achieved</h3>
+        <h3 id="tuningFinalOutcome">Stable swarm achieved</h3>
         <pre id="winningConfigOut"></pre>
-        <div style="display:flex; gap:8px; margin-top:8px;">
-          <button id="saveAsPresetBtn" class="btn-inline">Save as Preset</button>
-          <button id="runRepeatabilityBtn" class="btn-inline">Run Repeatability Test</button>
+        <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
+          <button id="saveAsPresetBtn" class="btn-inline" style="display:none;">Save Best Config</button>
+          <button id="runRepeatabilityBtn" class="btn-inline" style="display:none;">Run Repeatability Test</button>
+          <button id="exportTuningReportBtn" class="btn-inline" style="display:none;">Export Tuning Report</button>
         </div>
       </div>
     </div>
@@ -205,11 +210,37 @@ function renderTuningState(data){
   document.getElementById('tuningBestRun').textContent = data?.best_run ? JSON.stringify(data.best_run, null, 2) : 'No runs yet.';
   document.getElementById('tuningCurrentParams').textContent = data?.current_parameters ? JSON.stringify(data.current_parameters, null, 2) : 'Not started.';
   document.getElementById('tuningProgression').textContent = (data?.score_progression||[]).length ? JSON.stringify(data.score_progression, null, 2) : 'No scores yet.';
+  document.getElementById('tuningLiveStatus').textContent = JSON.stringify({
+    mode: data?.mode,
+    elapsed_seconds: data?.elapsed_seconds,
+    batch_number: data?.batch_number,
+    run_in_batch: data?.run_in_batch,
+    current_run: data?.current_run,
+    best_score: data?.best_score,
+    latest_outcome_label: data?.latest_outcome_label,
+    latest_adjustment_reason: data?.latest_adjustment_reason,
+    early_stop_reason: data?.early_stop_reason,
+  }, null, 2);
 
-  const success = data?.status === 'success';
-  document.getElementById('tuningSuccessPanel').style.display = success ? 'block' : 'none';
-  if(success){
-    document.getElementById('winningConfigOut').textContent = JSON.stringify(data.winning_config || {}, null, 2);
+  const finalStates = ['success','near_miss','failed','timeout','error'];
+  const done = finalStates.includes(data?.status);
+  document.getElementById('tuningSuccessPanel').style.display = done ? 'block' : 'none';
+  if(done){
+    const outcome = data?.final_outcome || data?.message || 'Tuning finished';
+    document.getElementById('tuningFinalOutcome').textContent = outcome;
+    document.getElementById('winningConfigOut').textContent = JSON.stringify({
+      winning_config: data?.winning_config,
+      repeatability: data?.repeatability,
+      candidate_configs: data?.candidate_configs,
+      final_summary_path: data?.final_summary_path,
+    }, null, 2);
+
+    const showSave = ['success','near_miss'].includes(data?.status);
+    const showRepeat = data?.status === 'near_miss';
+    const showExport = done;
+    document.getElementById('saveAsPresetBtn').style.display = showSave ? 'inline-block' : 'none';
+    document.getElementById('runRepeatabilityBtn').style.display = showRepeat ? 'inline-block' : 'none';
+    document.getElementById('exportTuningReportBtn').style.display = showExport ? 'inline-block' : 'none';
   }
 }
 
@@ -218,7 +249,7 @@ async function startTuningMode(){
   tuningModeActive = true;
   updateManualConfigVisualState();
   document.getElementById('startTuningBtn').disabled = true;
-  const res = await fetch('/api/tuning/start', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({mode, max_runs: 8})});
+  const res = await fetch('/api/tuning/start', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({mode, max_runs: 99999})});
   const data = await res.json();
   if(data.error){
     document.getElementById('startTuningBtn').disabled = false;
@@ -230,7 +261,7 @@ async function startTuningMode(){
     await new Promise(r=>setTimeout(r,1000));
     const state=await (await fetch('/api/tuning/state')).json();
     renderTuningState(state);
-    done=['success','failed','error'].includes(state.status);
+    done=['success','near_miss','failed','timeout','error'].includes(state.status);
   }
   document.getElementById('startTuningBtn').disabled = false;
 }
@@ -423,7 +454,8 @@ async function poll(){ const data=await (await fetch('/api/state')).json(); cons
 document.getElementById('runBtn').onclick=async()=>{ try{document.getElementById('runBtn').disabled=true; await startRun(); let done=false; while(!done){ await new Promise(r=>setTimeout(r,900)); done=await poll(); }}catch(e){document.getElementById('status').textContent=e.message; document.getElementById('runBtn').disabled=false;}};
 document.getElementById('startTuningBtn').onclick=async()=>{ try{ await startTuningMode(); }catch(e){ document.getElementById('tuningStatus').textContent = e.message; document.getElementById('startTuningBtn').disabled=false; }};
 document.getElementById('saveAsPresetBtn').onclick=()=>{ const cfg=document.getElementById('winningConfigOut').textContent||'{}'; const blob = new Blob([cfg], {type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='stable_swarm_winner.json'; a.click(); URL.revokeObjectURL(a.href); };
-document.getElementById('runRepeatabilityBtn').onclick=async()=>{ document.getElementById('tuningStatus').textContent='Repeatability test queued (placeholder).'; };
+document.getElementById('runRepeatabilityBtn').onclick=async()=>{ document.getElementById('tuningStatus').textContent='Repeatability can be triggered automatically from successful discovery runs.'; };
+document.getElementById('exportTuningReportBtn').onclick=()=>{document.getElementById('tuningStatus').textContent='Export report from final_summary_path shown below.'; };
 ['fGenMin','fGenMax','fTier','fDomain','fStatus','fMode','fLineage','fAgent'].forEach(id=>document.getElementById(id).addEventListener('input', refreshLedger));
 ['pbGen','pbDomain','pbLineage','pbAgent'].forEach(id=>document.getElementById(id).addEventListener('input', refreshProblemBoard));
 loadPresets();

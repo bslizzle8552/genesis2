@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import threading
+import time
 from typing import Dict, List
+import uuid
 
 from src.analytics.bvl import events_from_problem_metrics
-from src.analytics.swarm_scoring import HealthySwarmScorer
-
 from src.engine.simulation import SimulationEngine, load_config
+from src.tuner.adaptive_rig import adjust_parameters, build_find_stable_swarm_baseline, score_and_label_run
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -34,64 +36,62 @@ RUN_LOCK = threading.Lock()
 TUNING_STATE = {
     "status": "idle",
     "mode": None,
+    "tuning_session_id": None,
     "message": None,
+    "elapsed_seconds": 0,
+    "batch_number": 0,
+    "run_in_batch": 0,
     "current_run": 0,
     "max_runs": 0,
     "current_parameters": None,
+    "best_score": 0.0,
     "score_progression": [],
     "best_run": None,
     "winning_config": None,
+    "latest_outcome_label": None,
+    "latest_adjustment_reason": None,
+    "early_stop_reason": None,
+    "repeatability": None,
+    "candidate_configs": [],
+    "final_outcome": None,
+    "final_summary_path": None,
     "error": None,
 }
 
 
 def _stable_swarm_baseline() -> Dict[str, object]:
     source = DEFAULT_CONFIG if DEFAULT_CONFIG.exists() else LEGACY_DEFAULT_CONFIG
-    cfg = load_config(source)
-    params = asdict(cfg)
-    params.update({
-        "preset_name": "tuning_mode_find_stable_swarm",
-        "agents": 100,
-        "generations": 100,
-        "seed": 42,
-        "run_label": "tuning_mode_baseline",
-        "experiment_id": "tuning_mode",
-        "log_dir": "runs/tuning_mode",
-        "overwrite": False,
-    })
+    params = build_find_stable_swarm_baseline(source)
+    params.update({"seed": 42, "run_label": "adaptive_tuning_rig_baseline", "experiment_id": "adaptive_tuning_rig", "log_dir": "runs/tuning_sessions"})
     return params
 
 
 def _phase2_adaptive_update(params: Dict[str, object], score: Dict[str, object]) -> Dict[str, object]:
-    updated = dict(params)
-    gates = score.get("gates", {}) if isinstance(score, dict) else {}
-    population = score.get("component_metrics", {}).get("population_stability", {}) if isinstance(score, dict) else {}
-
-    if not gates.get("late_population_ok", True):
-        updated["initial_energy"] = min(180, int(updated.get("initial_energy", 100)) + 8)
-        updated["upkeep_cost"] = max(2, int(updated.get("upkeep_cost", 6)) - 1)
-        updated["reproduction_threshold"] = max(95.0, float(updated.get("reproduction_threshold", 130.0)) - 4.0)
-
-    if not gates.get("target_band_stability_ok", True) or not gates.get("population_volatility_ok", True):
-        updated["reproduction_cooldown_enabled"] = True
-        updated["reproduction_cooldown_generations"] = min(5, int(updated.get("reproduction_cooldown_generations", 2)) + 1)
-        updated["mutation_rate"] = max(0.05, float(updated.get("mutation_rate", 0.15)) - 0.01)
-
-    if not gates.get("late_lineage_count_ok", True) or not gates.get("top_lineage_share_ok", True):
-        updated["anti_dominance_enabled"] = True
-        updated["lineage_size_penalty_enabled"] = True
-        updated["lineage_energy_share_penalty_enabled"] = True
-        updated["diversity_bonus"] = min(3.0, float(updated.get("diversity_bonus", 1.0)) + 0.2)
-        updated["immigrant_injection_count"] = min(8, int(updated.get("immigrant_injection_count", 2)) + 1)
-
-    if not gates.get("solve_rate_ok", True):
-        updated["tasks_per_generation"] = max(12, int(updated.get("tasks_per_generation", 15)) - 2)
-
-    if population.get("late_avg_population", 0.0) > 120:
-        updated["upkeep_cost"] = min(12, int(updated.get("upkeep_cost", 6)) + 1)
-        updated["reproduction_threshold"] = min(180.0, float(updated.get("reproduction_threshold", 130.0)) + 2.0)
-
-    return updated
+    if isinstance(score, dict) and "gates" in score:
+        adapted = dict(params)
+        gates = score.get("gates", {})
+        population = score.get("component_metrics", {}).get("population_stability", {})
+        if not gates.get("late_population_ok", True):
+            adapted["initial_energy"] = min(180, int(adapted.get("initial_energy", 100)) + 8)
+            adapted["upkeep_cost"] = max(2, int(adapted.get("upkeep_cost", 6)) - 1)
+            adapted["reproduction_threshold"] = max(95.0, float(adapted.get("reproduction_threshold", 130.0)) - 4.0)
+        if not gates.get("target_band_stability_ok", True) or not gates.get("population_volatility_ok", True):
+            adapted["reproduction_cooldown_enabled"] = True
+            adapted["reproduction_cooldown_generations"] = min(5, int(adapted.get("reproduction_cooldown_generations", 2)) + 1)
+            adapted["mutation_rate"] = max(0.05, float(adapted.get("mutation_rate", 0.15)) - 0.01)
+        if not gates.get("late_lineage_count_ok", True) or not gates.get("top_lineage_share_ok", True):
+            adapted["anti_dominance_enabled"] = True
+            adapted["lineage_size_penalty_enabled"] = True
+            adapted["lineage_energy_share_penalty_enabled"] = True
+            adapted["diversity_bonus"] = min(3.0, float(adapted.get("diversity_bonus", 1.0)) + 0.2)
+            adapted["immigrant_injection_count"] = min(8, int(adapted.get("immigrant_injection_count", 2)) + 1)
+        if not gates.get("solve_rate_ok", True):
+            adapted["tasks_per_generation"] = max(12, int(adapted.get("tasks_per_generation", 15)) - 2)
+        if population.get("late_avg_population", 0.0) > 120:
+            adapted["upkeep_cost"] = min(12, int(adapted.get("upkeep_cost", 6)) + 1)
+            adapted["reproduction_threshold"] = min(180.0, float(adapted.get("reproduction_threshold", 130.0)) + 2.0)
+        return adapted
+    return adjust_parameters(params, score)[0]
 
 
 def discover_presets() -> List[Dict[str, object]]:
@@ -298,65 +298,227 @@ def config_from_request(payload: dict):
 
 
 def _run_find_stable_swarm(max_runs: int) -> None:
-    scorer = HealthySwarmScorer()
+    session_id = f"tuning_{uuid.uuid4().hex[:10]}"
+    started = time.monotonic()
+    started_iso = datetime.now(timezone.utc).isoformat()
+    wall_clock_limit_seconds = 3600
     params = _stable_swarm_baseline()
-    best_run = None
+    params["experiment_id"] = session_id
+    params["log_dir"] = f"runs/tuning_sessions/{session_id}"
+
+    session_dir = ROOT / "runs" / "tuning_sessions" / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    run_records: List[Dict[str, object]] = []
+    failure_modes: Dict[str, int] = {}
+    best_run: Dict[str, object] | None = None
+    candidate_configs: List[Dict[str, object]] = []
 
     TUNING_STATE["status"] = "running"
     TUNING_STATE["mode"] = "find_stable_swarm"
-    TUNING_STATE["message"] = "Tuning in progress"
+    TUNING_STATE["tuning_session_id"] = session_id
+    TUNING_STATE["message"] = "Adaptive tuning rig in progress"
+    TUNING_STATE["elapsed_seconds"] = 0
+    TUNING_STATE["batch_number"] = 1
+    TUNING_STATE["run_in_batch"] = 0
     TUNING_STATE["current_run"] = 0
     TUNING_STATE["max_runs"] = max_runs
+    TUNING_STATE["current_parameters"] = None
+    TUNING_STATE["best_score"] = 0.0
     TUNING_STATE["score_progression"] = []
     TUNING_STATE["best_run"] = None
     TUNING_STATE["winning_config"] = None
+    TUNING_STATE["latest_outcome_label"] = None
+    TUNING_STATE["latest_adjustment_reason"] = None
+    TUNING_STATE["early_stop_reason"] = None
+    TUNING_STATE["repeatability"] = None
+    TUNING_STATE["candidate_configs"] = []
+    TUNING_STATE["final_outcome"] = None
+    TUNING_STATE["final_summary_path"] = None
     TUNING_STATE["error"] = None
 
     try:
         for i in range(1, max_runs + 1):
+            elapsed = int(time.monotonic() - started)
+            TUNING_STATE["elapsed_seconds"] = elapsed
+            if elapsed >= wall_clock_limit_seconds:
+                TUNING_STATE["early_stop_reason"] = "1 hour wall-clock budget reached"
+                break
+
             TUNING_STATE["current_run"] = i
+            TUNING_STATE["run_in_batch"] = i
             current = dict(params)
-            current["run_label"] = f"tuning_mode_find_stable_swarm_r{i}"
-            current["experiment_id"] = "tuning_mode_find_stable_swarm"
-            current["log_dir"] = "runs/tuning_mode/find_stable_swarm"
+            current["run_label"] = f"{session_id}_r{i}"
+            current["experiment_id"] = session_id
+            current["log_dir"] = str(session_dir)
             TUNING_STATE["current_parameters"] = current
 
-            # avoid accidentally changing manual run global while tuning
             cfg = config_from_request({"preset": "ecosystem_optimal_v1.json", **current})
             result = SimulationEngine(cfg).run()
-            score = scorer.score_run(result)
-            entry = {
+            metrics = score_and_label_run(result)
+
+            run_record = {
+                "run_id": uuid.uuid4().hex,
+                "simulation_run_id": result.get("run_id", ""),
+                "run_dir": result.get("run_dir", ""),
+                "batch_number": 1,
+                "run_in_batch": i,
+                "params": current,
+                "score": metrics["score"],
+                "label": metrics["label"],
+                "metrics": metrics,
+            }
+            run_records.append(run_record)
+            failure_modes[metrics["label"]] = failure_modes.get(metrics["label"], 0) + 1
+            TUNING_STATE["latest_outcome_label"] = metrics["label"]
+
+            progression_entry = {
                 "run": i,
-                "score": score.get("composite_score", 0.0),
-                "pass": bool(score.get("pass", False)),
+                "score": metrics["score"],
+                "label": metrics["label"],
                 "run_id": result.get("run_id", ""),
                 "run_dir": result.get("run_dir", ""),
             }
-            TUNING_STATE["score_progression"].append(entry)
+            TUNING_STATE["score_progression"].append(progression_entry)
 
-            if best_run is None or entry["score"] > best_run["score"]:
-                best_run = {
-                    **entry,
-                    "gates": score.get("gates", {}),
-                    "config": current,
-                }
-                TUNING_STATE["best_run"] = best_run
+            if best_run is None or metrics["score"] > float(best_run.get("score", 0.0)):
+                best_run = run_record
+                TUNING_STATE["best_run"] = run_record
+                TUNING_STATE["best_score"] = metrics["score"]
 
-            if score.get("pass", False):
-                TUNING_STATE["status"] = "success"
-                TUNING_STATE["message"] = "Stable swarm achieved"
+            if metrics["healthy"] or metrics["near_healthy"]:
+                candidate_configs.append({
+                    "score": metrics["score"],
+                    "label": metrics["label"],
+                    "params": current,
+                    "simulation_run_id": result.get("run_id", ""),
+                })
+                candidate_configs = sorted(candidate_configs, key=lambda c: c["score"], reverse=True)[:3]
+                TUNING_STATE["candidate_configs"] = candidate_configs
+
+            if metrics["healthy"]:
+                repeatability_results = _run_repeatability_validation(current, session_id)
+                TUNING_STATE["repeatability"] = repeatability_results
+                if repeatability_results["passed"]:
+                    TUNING_STATE["status"] = "success"
+                    TUNING_STATE["message"] = "Stable swarm achieved"
+                    TUNING_STATE["winning_config"] = current
+                    TUNING_STATE["final_outcome"] = "Stable swarm achieved"
+                    break
+                TUNING_STATE["status"] = "near_miss"
+                TUNING_STATE["message"] = "Promising config found, repeatability not yet proven"
                 TUNING_STATE["winning_config"] = current
-                return
+                TUNING_STATE["final_outcome"] = "Promising config found, repeatability not yet proven"
+                break
 
-            params = _phase2_adaptive_update(current, score)
+            updated, reason = adjust_parameters(current, metrics)
+            params = updated
+            TUNING_STATE["latest_adjustment_reason"] = reason
 
-        TUNING_STATE["status"] = "failed"
-        TUNING_STATE["message"] = "Tuning completed without meeting stable swarm criteria"
-        TUNING_STATE["winning_config"] = best_run["config"] if best_run else None
+            if metrics["label"] in {"collapsed", "population_explosion"} and i >= 3:
+                last_labels = [r["label"] for r in run_records[-3:]]
+                if len(set(last_labels)) == 1:
+                    TUNING_STATE["early_stop_reason"] = f"Early stop on clearly bad direction: repeated {metrics['label']}"
+                    break
+
+        elapsed = int(time.monotonic() - started)
+        TUNING_STATE["elapsed_seconds"] = elapsed
+
+        if TUNING_STATE["status"] == "running":
+            if elapsed >= wall_clock_limit_seconds:
+                TUNING_STATE["status"] = "timeout"
+                TUNING_STATE["message"] = "No equilibrium found in 1 hour"
+                TUNING_STATE["final_outcome"] = "No equilibrium found in 1 hour"
+            elif candidate_configs:
+                TUNING_STATE["status"] = "near_miss"
+                TUNING_STATE["message"] = "Promising config found, repeatability not yet proven"
+                TUNING_STATE["final_outcome"] = "Promising config found, repeatability not yet proven"
+                TUNING_STATE["winning_config"] = candidate_configs[0]["params"]
+            else:
+                TUNING_STATE["status"] = "failed"
+                TUNING_STATE["message"] = "Tuning completed without achieving equilibrium"
+                TUNING_STATE["final_outcome"] = "No equilibrium found in 1 hour" if TUNING_STATE.get("early_stop_reason") else "Promising config found, repeatability not yet proven"
+
+        summary = _build_tuning_summary(
+            session_id=session_id,
+            started_at=started_iso,
+            elapsed_seconds=elapsed,
+            run_records=run_records,
+            best_run=best_run,
+            candidate_configs=candidate_configs,
+            failure_modes=failure_modes,
+            final_outcome=TUNING_STATE.get("final_outcome") or "No equilibrium found in 1 hour",
+            repeatability=TUNING_STATE.get("repeatability"),
+            early_stop_reason=TUNING_STATE.get("early_stop_reason"),
+        )
+        summary_path = session_dir / "final_session_summary.json"
+        summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+        runs_jsonl = session_dir / "runs.jsonl"
+        with runs_jsonl.open("w", encoding="utf-8") as handle:
+            for record in run_records:
+                handle.write(json.dumps(record) + "\n")
+
+        TUNING_STATE["final_summary_path"] = str(summary_path)
     except Exception as exc:  # pragma: no cover
         TUNING_STATE["status"] = "error"
         TUNING_STATE["error"] = str(exc)
         TUNING_STATE["message"] = "Tuning failed"
+
+
+def _run_repeatability_validation(base_params: Dict[str, object], session_id: str) -> Dict[str, object]:
+    results: List[Dict[str, object]] = []
+    pass_count = 0
+    catastrophic = 0
+    for i in range(5):
+        cfg_params = dict(base_params)
+        cfg_params["seed"] = int(base_params.get("seed", 42)) + 100 + i
+        cfg_params["run_label"] = f"{session_id}_repeatability_{i + 1}"
+        cfg = config_from_request({"preset": "ecosystem_optimal_v1.json", **cfg_params})
+        result = SimulationEngine(cfg).run()
+        metrics = score_and_label_run(result)
+        if metrics["healthy"]:
+            pass_count += 1
+        if metrics["label"] in {"collapsed", "population_explosion"}:
+            catastrophic += 1
+        results.append({
+            "run_id": uuid.uuid4().hex,
+            "simulation_run_id": result.get("run_id", ""),
+            "run_dir": result.get("run_dir", ""),
+            "seed": cfg_params["seed"],
+            "score": metrics["score"],
+            "label": metrics["label"],
+        })
+
+    return {
+        "required_passes": 3,
+        "pass_count": pass_count,
+        "repeat_runs": 5,
+        "catastrophic_failures": catastrophic,
+        "passed": pass_count >= 3 and catastrophic == 0,
+        "results": results,
+    }
+
+
+def _build_tuning_summary(*, session_id: str, started_at: str, elapsed_seconds: int, run_records: List[Dict[str, object]], best_run: Dict[str, object] | None, candidate_configs: List[Dict[str, object]], failure_modes: Dict[str, int], final_outcome: str, repeatability: Dict[str, object] | None, early_stop_reason: str | None) -> Dict[str, object]:
+    dominant = sorted(failure_modes.items(), key=lambda kv: kv[1], reverse=True)
+    top_candidates = sorted(candidate_configs, key=lambda c: c["score"], reverse=True)[:3]
+    suggested = "Increase anti-dominance pressure and reduce mutation volatility" if failure_modes.get("population_explosion", 0) > failure_modes.get("collapsed", 0) else "Increase initial energy and lower reproduction threshold to avoid collapse"
+    return {
+        "tuning_session_id": session_id,
+        "mode": "find_stable_swarm",
+        "started_at": started_at,
+        "elapsed_seconds": elapsed_seconds,
+        "total_runs_executed": len(run_records),
+        "best_score": best_run.get("score", 0.0) if best_run else 0.0,
+        "best_config": best_run.get("params") if best_run else None,
+        "top_candidate_configs": top_candidates,
+        "dominant_failure_modes": [{"label": label, "count": count} for label, count in dominant],
+        "repeatability": repeatability,
+        "early_stop_reason": early_stop_reason,
+        "suggested_next_tuning_direction": suggested,
+        "final_outcome": final_outcome,
+    }
 
 
 

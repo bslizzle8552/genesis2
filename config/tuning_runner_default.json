@@ -1,0 +1,41 @@
+{
+  "max_runs": 8,
+  "max_seconds": 3600,
+  "model": "claude-3-5-sonnet-20241022",
+  "simulator_cmd": "python -m src.main",
+  "output_dir": "runs/tuning_runner",
+  "objective": {
+    "description": "Tune Genesis2 to a healthy swarm profile.",
+    "targets": [
+      "start ~25 agents",
+      "grow to ~100 by generation ~80",
+      "remain in 90-110",
+      "maintain multiple viable lineages",
+      "avoid dominance",
+      "preserve late reproduction",
+      "preserve collaboration/specialization"
+    ]
+  },
+  "levers": {
+    "agents": {"min": 20, "max": 30, "max_step": 2, "effect": "starting population"},
+    "generations": {"min": 80, "max": 140, "max_step": 10, "effect": "simulation horizon"},
+    "initial_energy": {"min": 80, "max": 220, "max_step": 15, "effect": "survival buffer"},
+    "reproduction_threshold": {"min": 90, "max": 240, "max_step": 12, "effect": "birth strictness"},
+    "mutation_rate": {"min": 0.05, "max": 0.5, "max_step": 0.04, "effect": "exploration volatility"},
+    "upkeep_cost": {"min": 2, "max": 14, "max_step": 2, "effect": "resource pressure"},
+    "tasks_per_generation": {"min": 10, "max": 120, "max_step": 10, "effect": "workload pressure"},
+    "diversity_bonus": {"min": 0.0, "max": 1.0, "max_step": 0.08, "effect": "lineage spread"},
+    "diversity_min_lineages": {"min": 2, "max": 30, "max_step": 3, "effect": "minimum lineage target"}
+  },
+  "initial_config": {
+    "agents": 25,
+    "generations": 100,
+    "initial_energy": 100,
+    "reproduction_threshold": 130,
+    "mutation_rate": 0.15,
+    "upkeep_cost": 6,
+    "tasks_per_generation": 30,
+    "diversity_bonus": 0.2,
+    "diversity_min_lineages": 6
+  }
+}

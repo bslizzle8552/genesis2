@@ -1,4 +1,4 @@
-from src.backends.server import config_from_request, discover_presets
+from src.backends.server import _phase2_adaptive_update, _stable_swarm_baseline, config_from_request, discover_presets
 
 
 def test_discover_presets_lists_experiment_configs():
@@ -93,3 +93,37 @@ def test_discover_presets_exposes_anti_dominance_ui_fields():
         "child_energy_fraction",
     ]:
         assert key in fast
+
+
+def test_stable_swarm_baseline_uses_target_size():
+    baseline = _stable_swarm_baseline()
+    assert baseline["agents"] == 100
+    assert baseline["generations"] == 100
+
+
+def test_phase2_adaptive_update_adjusts_for_low_population():
+    params = {
+        "initial_energy": 100,
+        "upkeep_cost": 6,
+        "reproduction_threshold": 130.0,
+        "mutation_rate": 0.15,
+        "tasks_per_generation": 20,
+        "diversity_bonus": 1.0,
+        "immigrant_injection_count": 2,
+    }
+    score = {
+        "gates": {
+            "late_population_ok": False,
+            "target_band_stability_ok": False,
+            "population_volatility_ok": False,
+            "late_lineage_count_ok": False,
+            "top_lineage_share_ok": False,
+            "solve_rate_ok": False,
+        },
+        "component_metrics": {"population_stability": {"late_avg_population": 50}},
+    }
+    updated = _phase2_adaptive_update(params, score)
+    assert updated["initial_energy"] > params["initial_energy"]
+    assert updated["upkeep_cost"] < params["upkeep_cost"]
+    assert updated["anti_dominance_enabled"] is True
+    assert updated["reproduction_cooldown_enabled"] is True

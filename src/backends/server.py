@@ -415,7 +415,7 @@ def _run_find_stable_swarm(max_runs: int) -> None:
             params = updated
             TUNING_STATE["latest_adjustment_reason"] = reason
 
-            if metrics["label"] in {"collapsed", "population_explosion"} and i >= 3:
+            if metrics["label"] in {"failed_collapse", "failed_overshoot"} and i >= 3:
                 last_labels = [r["label"] for r in run_records[-3:]]
                 if len(set(last_labels)) == 1:
                     TUNING_STATE["early_stop_reason"] = f"Early stop on clearly bad direction: repeated {metrics['label']}"
@@ -479,7 +479,7 @@ def _run_repeatability_validation(base_params: Dict[str, object], session_id: st
         metrics = score_and_label_run(result)
         if metrics["healthy"]:
             pass_count += 1
-        if metrics["label"] in {"collapsed", "population_explosion"}:
+        if metrics["label"] in {"failed_collapse", "failed_overshoot"}:
             catastrophic += 1
         results.append({
             "run_id": uuid.uuid4().hex,
@@ -503,7 +503,7 @@ def _run_repeatability_validation(base_params: Dict[str, object], session_id: st
 def _build_tuning_summary(*, session_id: str, started_at: str, elapsed_seconds: int, run_records: List[Dict[str, object]], best_run: Dict[str, object] | None, candidate_configs: List[Dict[str, object]], failure_modes: Dict[str, int], final_outcome: str, repeatability: Dict[str, object] | None, early_stop_reason: str | None) -> Dict[str, object]:
     dominant = sorted(failure_modes.items(), key=lambda kv: kv[1], reverse=True)
     top_candidates = sorted(candidate_configs, key=lambda c: c["score"], reverse=True)[:3]
-    suggested = "Increase anti-dominance pressure and reduce mutation volatility" if failure_modes.get("population_explosion", 0) > failure_modes.get("collapsed", 0) else "Increase initial energy and lower reproduction threshold to avoid collapse"
+    suggested = "Increase anti-dominance pressure and reduce mutation volatility" if failure_modes.get("failed_overshoot", 0) > failure_modes.get("failed_collapse", 0) else "Increase initial energy and lower reproduction threshold to avoid collapse"
     return {
         "tuning_session_id": session_id,
         "mode": "find_stable_swarm",

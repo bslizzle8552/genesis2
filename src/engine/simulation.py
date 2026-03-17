@@ -1703,6 +1703,7 @@ class SimulationEngine:
 
             for problem in board.problems:
                 participants = list(dict.fromkeys(problem.agents_involved))
+                live_lookup = {a.agent_id: a for a in self.agents}
                 logger.log_stream("problem_metrics", {
                     "schema_version": "1.0",
                     "problem_id": problem.problem_id,
@@ -1720,6 +1721,14 @@ class SimulationEngine:
                     "reward_split": problem.reward_split,
                     "participant_roles": {aid: next((a.choose_role() for a in self.agents if a.agent_id == aid), "unknown") for aid in participants},
                     "contribution_chain_sequence": [step.get("type") for step in problem.contribution_chain],
+                    "contribution_chain": [
+                        {
+                            **step,
+                            "lineage_id": live_lookup.get(step.get("agent_id", ""), None).lineage_id if live_lookup.get(step.get("agent_id", ""), None) else None,
+                            "role": live_lookup.get(step.get("agent_id", ""), None).choose_role() if live_lookup.get(step.get("agent_id", ""), None) else "unknown",
+                        }
+                        for step in problem.contribution_chain
+                    ],
                 })
 
             window = snapshots[-self.config.diagnostics_window + 1 :] + [{

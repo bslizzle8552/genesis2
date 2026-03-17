@@ -64,7 +64,6 @@ class SimulationConfig:
     diversity_min_lineages: int = 4
     immigrant_injection_count: int = 2
     tier_mix: Dict[str, float] | None = None
-    api_access: bool = False
     run_label: str = "default"
     experiment_id: str = "adhoc"
     reward_policy_id: str = "baseline"
@@ -643,7 +642,7 @@ class SimulationEngine:
         artifact_solved = [p for p in solved if any(c.get("type") == "artifact_reuse" for c in p.contribution_chain)]
 
         return {
-            "mode": "no_api" if not self.config.api_access else "with_api",
+            "mode": "simulator_only",
             "tier_success_over_time": dict(tier_history),
             "domain_success_over_time": dict(domain_history),
             "plateau_detected": bool(plateaued),
@@ -1327,7 +1326,6 @@ class SimulationEngine:
             f"- Seed: {self.config.seed}",
             f"- Starting agents: {self.config.agents}",
             f"- Generations: {self.config.generations}",
-            f"- API Access: {'enabled' if self.config.api_access else 'disabled (no-API)'}",
             "",
             "## Outcomes",
             f"- Final population: {result['final_population']}",

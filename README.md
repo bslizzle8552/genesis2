@@ -1,124 +1,59 @@
 # Genesis2
 
-SWARM Intelligence Evolution simulator where agents evolve workflows, strategy, and artifacts in an energy economy.
+Genesis2 is now a **clean simulator + external controller** architecture.
 
-## Features
+## Simulator contract
 
-- Python simulation engine with structured genomes
-- Mutation + asexual reproduction
-- World board with task tiers/domains and economy scoring
-- Per-generation JSON logging in `runs/`
-- Local web UI with presets sourced from `config/*.json`, custom params, dashboard, board/report inspector
-- Windows launcher (`START_GENESIS2.bat`)
+`src.main` does only four things:
+1. Load config
+2. Run simulation
+3. Write structured JSON output
+4. Exit
 
-## Quick start
+Run it with:
 
 ```bash
 python -m src.main --config config/default.json
-python -m src.backends.server --host 0.0.0.0 --port 8000
 ```
 
-Then open `http://localhost:8000`.
-
-## First experiment
-
-The default config is already set to:
-- 10 agents
-- 50 generations
-- local-only execution (no external APIs)
-- full generation logging
-
-
-## Presets
-
-The UI automatically loads every JSON file in `config/` as a run preset (for example `experiment_fast.json`, `experiment_default.json`, `experiment_stress.json`).
-You can still override seed/agent/generation values directly before pressing run.
-
-## Healthy swarm scoring harness
-
-Run a scored sweep:
+Optional explicit output path:
 
 ```bash
-python -m src.main --experiment-config config/experiment_healthy_swarm_matrix_v1.json
+python -m src.main --config config/default.json --output-json runs/my_run/simulator_output.json
 ```
 
-Run anti-dominance family matrix (baseline + 5 policy families):
+The simulator output JSON always includes:
+- `config_used`
+- `start_population`
+- `max_population`
+- `final_population`
+- `generations_in_target_band`
+- `viable_lineages`
+- `late_births`
+- `dominance_share`
+- `stability_flag`
+- `failure_mode` (`overshoot|collapse|dominance|low_diversity|weak_growth|unstable|success`)
+
+## External tuning loop
+
+Use `tuning_runner.py` as the controller:
 
 ```bash
-python -m src.main --anti-dominance-config config/experiment_anti_dominance_matrix_v1.json
+python tuning_runner.py --runner-config config/tuning_runner_default.json --api-key <your_key>
 ```
 
-Each harness run now writes:
-- `comparison_summary.json` (legacy run list + scores)
-- `runs_detailed.json` (per-trial diagnostics + component score breakdown)
-- `config_aggregates.json` (mean/std/min/max score by config)
-- `leaderboard.json` (ranked configs)
-- `healthy_swarm_score.json` inside each run directory
+What it does:
+- Loads objective and bounded lever definitions
+- Requests initial recommendation from Anthropic (if key provided)
+- Runs simulator as a subprocess each iteration
+- Reads simulator JSON output
+- Produces per-run human-readable summaries
+- Calls Anthropic again with compact run history + latest summary
+- Applies strict bounds and per-run max step limits
+- Falls back to deterministic adjustments when API fails/unavailable
 
+Outputs are written to unique session folders under `runs/tuning_runner/`.
 
-## Dist. Intelligence Ready - Stable tuning preset
+## Local UI
 
-Run the built-in ecological readiness tuner (growth to ~100 by gen ~80, then stable band persistence):
-
-```bash
-python -m src.main --tuning-config config/tuning_dist_intelligence_ready_stable.json
-```
-
-Tune controls in that JSON file:
-- `search.timeout_seconds`
-- `search.search_budget`
-- `search.target_qualifying_configs`
-
-The run stops when timeout is reached or enough qualifying configs are harvested. Outputs include:
-- `runs_detailed.json`, `config_aggregates.json`, `leaderboard.json`
-- `harvested_stable_swarms_registry.json` (qualifying config registry + goal conditions)
-
-
-## Adaptive tuning rig human-readable reports
-
-Start the local control server:
-
-```bash
-python -m src.backends.server --host 0.0.0.0 --port 8000
-```
-
-Then open `http://localhost:8000` and use **Adaptive Tuning Rig**.
-
-Each tuning session now writes a unique folder under `runs/tuning_sessions/<session_id>/` with:
-- `final_session_summary.json` (machine + human-readable report sections)
-- `final_session_report.md` (plain-English session notebook)
-- `runs.jsonl` (full per-run records)
-
-Each run directory still keeps existing artifacts and now includes additional observability exports (`reproduction_events.json`, `lineage_summary.json`, etc.).
-
-### Advisory API configuration
-
-You can configure advisory mode in three places:
-1. UI fields (endpoint, model, API key env var name, enabled toggle)
-2. Environment variables:
-   - `GENESIS2_ADVISORY_ENDPOINT`
-   - `GENESIS2_ADVISORY_MODEL`
-   - `GENESIS2_ADVISORY_API_KEY_ENV` (defaults to `GENESIS2_ADVISORY_API_KEY`)
-3. Optional config file: `config/advisory.json` (or `config/tuner_advisory.json`)
-
-Fallback behavior is deterministic-only tuning when advisory is disabled, endpoint is missing, or API key is absent.
-
-## Anthropic run-to-failure test harness
-
-Use this when you want an automated loop that:
-1) asks Anthropic for bounded parameter recommendations,
-2) runs the simulator until it hits a stop condition,
-3) writes a human-readable incident report,
-4) calls Anthropic again with the incident details for the next recommendation.
-
-Example:
-
-```bash
-cp config/anthropic_harness_spec.example.json config/anthropic_harness_spec.json
-export ANTHROPIC_API_KEY=...your key...
-python -m src.tuner.anthropic_test_harness --spec config/anthropic_harness_spec.json
-```
-
-Outputs are written under `runs/anthropic_harness/<session_id>/`:
-- `incident_report.md` (human-readable summary of the stop-triggering run sequence)
-- `session_output.json` (full machine-readable logs + follow-up Anthropic recommendation payload)
+The local UI/server is optional and not required for simulator + tuning loop workflows.

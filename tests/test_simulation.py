@@ -10,7 +10,7 @@ def test_simulation_runs_and_logs(tmp_path):
     assert result["final_population"] >= 0
     assert len(result["timeline"]) >= 1
     run_dir = Path(result["summary_path"]).parent
-    assert run_dir.name.startswith("default__")
+    assert run_dir.name.startswith("run_")
     assert (run_dir / "summary.json").exists()
 
 
@@ -118,7 +118,21 @@ def test_run_label_is_sanitized_in_folder_name(tmp_path):
     result = SimulationEngine(cfg).run()
     run_dir = Path(result["summary_path"]).parent
 
-    assert run_dir.name.startswith("My-Run-Label__")
+    assert run_dir.name.startswith("run_")
+    assert "_custom_12_" in run_dir.name
+
+
+def test_run_manifest_contains_config_identity_metadata(tmp_path):
+    cfg = SimulationConfig(seed=22, agents=6, generations=3, tasks_per_generation=3, log_dir=str(tmp_path), preset_name="stabilization_strong")
+    result = SimulationEngine(cfg).run()
+    run_dir = Path(result["summary_path"]).parent
+    manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
+
+    assert "config_hash" in manifest
+    assert manifest["config_hash"] == result["config_hash"]
+    assert manifest["preset_name"] == "stabilization_strong"
+    assert manifest["run_instance_id"] == result["run_instance_id"]
+    assert (run_dir / "config.json").exists()
 
 
 def test_generation_metrics_include_dominance_fields(tmp_path):

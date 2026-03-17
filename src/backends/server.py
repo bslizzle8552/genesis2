@@ -16,7 +16,9 @@ from src.engine.simulation import SimulationEngine, load_config
 ROOT = Path(__file__).resolve().parents[2]
 UI_PATH = ROOT / "src" / "ui" / "index.html"
 CONFIG_PATH = ROOT / "config"
-DEFAULT_CONFIG = CONFIG_PATH / "default.json"
+CONFIGS_PATH = ROOT / "configs"
+DEFAULT_CONFIG = CONFIGS_PATH / "ecosystem_optimal_v1.json"
+LEGACY_DEFAULT_CONFIG = CONFIG_PATH / "default.json"
 
 LAST_RESULT = {
     "status": "idle",
@@ -31,45 +33,90 @@ RUN_LOCK = threading.Lock()
 
 def discover_presets() -> List[Dict[str, object]]:
     presets: List[Dict[str, object]] = []
-    for path in sorted(CONFIG_PATH.glob("*.json")):
-        if path.name.startswith("_"):
+    seen_ids: set[str] = set()
+    search_roots = [CONFIGS_PATH, CONFIG_PATH]
+    for root in search_roots:
+        if not root.exists():
             continue
-        label = path.stem.replace("_", " ").title()
-        cfg = json.loads(path.read_text(encoding="utf-8"))
-        presets.append(
-            {
-                "id": path.name,
-                "label": label,
-                "seed": cfg.get("seed"),
-                "agents": cfg.get("agents"),
-                "generations": cfg.get("generations"),
-                "tasks_per_generation": cfg.get("tasks_per_generation"),
-                "initial_energy": cfg.get("initial_energy"),
-                "upkeep_cost": cfg.get("upkeep_cost"),
-                "reproduction_threshold": cfg.get("reproduction_threshold", 130),
-                "mutation_rate": cfg.get("mutation_rate", 0.15),
-                "diversity_bonus": cfg.get("diversity_bonus", 1.0),
-                "diversity_min_lineages": cfg.get("diversity_min_lineages", 4),
-                "immigrant_injection_count": cfg.get("immigrant_injection_count", 2),
-                "tier_mix": cfg.get("tier_mix", {"1": 0.34, "2": 0.31, "3": 0.21, "4": 0.14}),
-                "anti_dominance_enabled": cfg.get("anti_dominance_enabled", False),
-                "diminishing_reward_enabled": cfg.get("diminishing_reward_enabled", False),
-                "diminishing_reward_k": cfg.get("diminishing_reward_k", 250.0),
-                "lineage_size_penalty_enabled": cfg.get("lineage_size_penalty_enabled", False),
-                "lineage_size_penalty_threshold": cfg.get("lineage_size_penalty_threshold", 45),
-                "lineage_size_penalty_multiplier": cfg.get("lineage_size_penalty_multiplier", 0.85),
-                "reproduction_cooldown_enabled": cfg.get("reproduction_cooldown_enabled", False),
-                "reproduction_cooldown_generations": cfg.get("reproduction_cooldown_generations", 2),
-                "child_energy_fraction": cfg.get("child_energy_fraction", 0.5),
-            }
-        )
-
-    if not any(p["id"] == "default.json" for p in presets) and DEFAULT_CONFIG.exists():
+        for path in sorted(root.rglob("*.json")):
+            if path.name.startswith("_"):
+                continue
+            rel_id = str(path.relative_to(root)).replace("\\", "/")
+            if rel_id in seen_ids:
+                continue
+            label = path.stem.replace("_", " ").title()
+            cfg = json.loads(path.read_text(encoding="utf-8"))
+            if "simulation" in cfg:
+                sim = cfg.get("simulation", {})
+                diversity = cfg.get("diversity", {})
+                anti = cfg.get("anti_dominance", {})
+                diminishing = anti.get("diminishing_rewards", {}) if isinstance(anti, dict) else {}
+                lineage = anti.get("lineage_penalty", {}) if isinstance(anti, dict) else {}
+                reproduction = anti.get("reproduction", {}) if isinstance(anti, dict) else {}
+                tier_mix = cfg.get("tier_mix", {})
+                preset = {
+                    "id": rel_id,
+                    "label": label,
+                    "preset_name": cfg.get("preset_name", path.stem),
+                    "agents": sim.get("agents"),
+                    "generations": sim.get("generations"),
+                    "initial_energy": sim.get("initial_energy"),
+                    "upkeep_cost": sim.get("upkeep_cost"),
+                    "tasks_per_generation": sim.get("tasks_per_generation"),
+                    "reproduction_threshold": sim.get("reproduction_threshold"),
+                    "mutation_rate": sim.get("mutation_rate"),
+                    "diversity_bonus": diversity.get("bonus", 1.0),
+                    "diversity_min_lineages": diversity.get("min_lineages", 4),
+                    "immigrant_injection_count": diversity.get("immigrant_injection_count", 2),
+                    "tier_mix": {"1": tier_mix.get("t1", 0.34), "2": tier_mix.get("t2", 0.31), "3": tier_mix.get("t3", 0.21), "4": tier_mix.get("t4", 0.14)},
+                    "anti_dominance_enabled": anti.get("enabled", False),
+                    "diminishing_reward_enabled": diminishing.get("enabled", False),
+                    "diminishing_reward_k": diminishing.get("k", 250.0),
+                    "lineage_size_penalty_enabled": lineage.get("enabled", False),
+                    "lineage_size_penalty_threshold": lineage.get("threshold", 45),
+                    "lineage_size_penalty_multiplier": lineage.get("strength", 0.85),
+                    "reproduction_cooldown_enabled": reproduction.get("cooldown_enabled", False),
+                    "reproduction_cooldown_generations": reproduction.get("cooldown_generations", 2),
+                    "child_energy_fraction": reproduction.get("energy_split", 0.5),
+                    "schema": cfg,
+                }
+            else:
+                preset = {
+                    "id": rel_id,
+                    "label": label,
+                    "preset_name": cfg.get("preset_name", path.stem),
+                    "seed": cfg.get("seed"),
+                    "agents": cfg.get("agents"),
+                    "generations": cfg.get("generations"),
+                    "tasks_per_generation": cfg.get("tasks_per_generation"),
+                    "initial_energy": cfg.get("initial_energy"),
+                    "upkeep_cost": cfg.get("upkeep_cost"),
+                    "reproduction_threshold": cfg.get("reproduction_threshold", 130),
+                    "mutation_rate": cfg.get("mutation_rate", 0.15),
+                    "diversity_bonus": cfg.get("diversity_bonus", 1.0),
+                    "diversity_min_lineages": cfg.get("diversity_min_lineages", 4),
+                    "immigrant_injection_count": cfg.get("immigrant_injection_count", 2),
+                    "tier_mix": cfg.get("tier_mix", {"1": 0.34, "2": 0.31, "3": 0.21, "4": 0.14}),
+                    "anti_dominance_enabled": cfg.get("anti_dominance_enabled", False),
+                    "diminishing_reward_enabled": cfg.get("diminishing_reward_enabled", False),
+                    "diminishing_reward_k": cfg.get("diminishing_reward_k", 250.0),
+                    "lineage_size_penalty_enabled": cfg.get("lineage_size_penalty_enabled", False),
+                    "lineage_size_penalty_threshold": cfg.get("lineage_size_penalty_threshold", 45),
+                    "lineage_size_penalty_multiplier": cfg.get("lineage_size_penalty_multiplier", 0.85),
+                    "reproduction_cooldown_enabled": cfg.get("reproduction_cooldown_enabled", False),
+                    "reproduction_cooldown_generations": cfg.get("reproduction_cooldown_generations", 2),
+                    "child_energy_fraction": cfg.get("child_energy_fraction", 0.5),
+                    "schema": None,
+                }
+            presets.append(preset)
+            seen_ids.add(rel_id)
+    if not presets and LEGACY_DEFAULT_CONFIG.exists():
         presets.insert(
             0,
             {
                 "id": "default.json",
                 "label": "Default",
+                "preset_name": "default",
                 "seed": 42,
                 "agents": 10,
                 "generations": 50,
@@ -91,6 +138,7 @@ def discover_presets() -> List[Dict[str, object]]:
                 "reproduction_cooldown_enabled": False,
                 "reproduction_cooldown_generations": 2,
                 "child_energy_fraction": 0.5,
+                "schema": None,
             },
         )
 
@@ -98,15 +146,21 @@ def discover_presets() -> List[Dict[str, object]]:
 
 
 def config_from_request(payload: dict):
-    preset = payload.get("preset", "default.json")
-    preset_path = (CONFIG_PATH / preset).resolve()
+    preset = payload.get("preset", "ecosystem_optimal_v1.json")
+    candidate_paths = [(CONFIGS_PATH / preset).resolve(), (CONFIG_PATH / preset).resolve()]
+    preset_path = None
+    for candidate in candidate_paths:
+        if candidate.exists():
+            preset_path = candidate
+            break
+    if preset_path is None:
+        preset_path = DEFAULT_CONFIG if DEFAULT_CONFIG.exists() else LEGACY_DEFAULT_CONFIG
+    allowed_roots = [CONFIGS_PATH.resolve(), CONFIG_PATH.resolve()]
+    if not any(str(preset_path).startswith(str(root)) for root in allowed_roots):
+        raise ValueError("invalid preset path")
+    cfg = load_config(preset_path)
 
-    try:
-        preset_path.relative_to(CONFIG_PATH.resolve())
-    except ValueError as exc:
-        raise ValueError("invalid preset path") from exc
-
-    cfg = load_config(preset_path if preset_path.exists() else DEFAULT_CONFIG)
+    cfg.preset_name = str(payload.get("preset_name") or Path(preset).stem or cfg.preset_name)
     integer_fields = [
         "seed",
         "agents",
@@ -212,9 +266,7 @@ class GenesisHandler(BaseHTTPRequestHandler):
                 LAST_RESULT["status"] = "running"
                 LAST_RESULT["result"] = None
                 LAST_RESULT["error"] = None
-                run_name = f"run_seed{cfg.seed}_g{cfg.generations}_{cfg.run_label}"
-                run_dir = str((Path(cfg.log_dir) / run_name).resolve())
-                LAST_RESULT["run_dir"] = run_dir
+                LAST_RESULT["run_dir"] = None
                 LAST_RESULT["problem_board_events"] = []
                 LAST_RESULT["progress"] = {
                     "generation": 0,
@@ -239,6 +291,7 @@ class GenesisHandler(BaseHTTPRequestHandler):
                         result = engine.run(progress_callback=progress_callback)
                         LAST_RESULT["status"] = "done"
                         LAST_RESULT["result"] = result
+                        LAST_RESULT["run_dir"] = result.get("run_dir")
                         LAST_RESULT["problem_board_events"] = events_from_problem_metrics(LAST_RESULT.get("run_dir") or "")
                     except Exception as exc:  # pragma: no cover
                         LAST_RESULT["status"] = "error"

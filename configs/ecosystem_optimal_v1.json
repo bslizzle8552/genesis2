@@ -1,0 +1,40 @@
+{
+  "preset_name": "ecosystem_optimal_v1",
+  "simulation": {
+    "agents": 200,
+    "generations": 100,
+    "initial_energy": 100.0,
+    "upkeep_cost": 6.0,
+    "tasks_per_generation": 60,
+    "reproduction_threshold": 130.0,
+    "mutation_rate": 0.28
+  },
+  "diversity": {
+    "bonus": 0.175,
+    "min_lineages": 14,
+    "immigrant_injection_count": 7
+  },
+  "anti_dominance": {
+    "enabled": true,
+    "diminishing_rewards": {
+      "enabled": true,
+      "k": 280.0
+    },
+    "lineage_penalty": {
+      "enabled": true,
+      "threshold": 45.0,
+      "strength": 0.85
+    },
+    "reproduction": {
+      "cooldown_enabled": true,
+      "cooldown_generations": 2,
+      "energy_split": 0.5
+    }
+  },
+  "tier_mix": {
+    "t1": 0.34,
+    "t2": 0.31,
+    "t3": 0.21,
+    "t4": 0.14
+  }
+}

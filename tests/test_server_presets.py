@@ -1,4 +1,4 @@
-from src.backends.server import _build_markdown_report, _build_tuning_summary, _phase2_adaptive_update, _stable_swarm_baseline, config_from_request, discover_presets
+from src.backends.server import _advisory_failure_reason, _build_markdown_report, _build_tuning_summary, _phase2_adaptive_update, _stable_swarm_baseline, config_from_request, discover_presets
 
 
 def test_discover_presets_lists_experiment_configs():
@@ -23,6 +23,12 @@ def test_config_from_request_overrides_values():
     assert cfg.agents == 11
     assert cfg.generations == 13
 
+
+
+
+def test_config_from_request_can_set_api_access():
+    cfg = config_from_request({"preset": "experiment_fast.json", "api_access": True})
+    assert cfg.api_access is True
 
 def test_config_from_request_supports_extended_fields():
     cfg = config_from_request({
@@ -144,9 +150,17 @@ def test_tuning_summary_contains_goal_and_advisory_fields():
         session_diagnostics={},
         advisory_settings={"advisory_api_enabled": True},
         advisory_usage={"calls": 1, "accepted": 1, "operator_summaries": ["ok"]},
+        advisor_enabled_ui=True,
+        advisor_active_runtime=True,
+        advisor_failure_reason=None,
+        advisory_calls_made=1,
+        advisory_events=[{"run": 1, "call_made": True}],
     )
     assert summary["goal_profile"]["starting_agents_target"] == 25
     assert summary["advisory_usage"]["calls"] == 1
+    assert summary["advisor_enabled_ui"] is True
+    assert summary["advisor_active_runtime"] is True
+    assert summary["advisory_calls_made"] == 1
 
 
 def test_markdown_report_includes_advisory_section():
@@ -159,10 +173,17 @@ def test_markdown_report_includes_advisory_section():
         "top_candidate_configs": [],
         "dominant_failure_modes": [],
         "advisory_usage": {"calls": 1, "accepted": 0, "operator_summaries": ["fallback"]},
+        "advisor_enabled_ui": True,
+        "advisor_active_runtime": True,
+        "advisor_failure_reason": None,
+        "advisory_calls_made": 1,
+        "advisory_events": [{"run": 1, "call_made": True, "request_summary": "x", "response_summary": "y", "recommendations_accepted": True, "recommendations_rejected": False, "failure_reason": None}],
         "suggested_next_tuning_direction": "Tune diversity",
     })
     assert "## Advisory API Usage" in report
     assert "Calls: 1" in report
+    assert "Active at runtime: True" in report
+    assert "## Advisory Event Log" in report
 
 
 def test_tuning_summary_includes_human_readable_sections():
@@ -202,3 +223,9 @@ def test_tuning_summary_includes_human_readable_sections():
     assert "executive_summary" in human
     assert "run_level_reports" in human
     assert human["failure_breakdown"]["dominance"] >= 1 or human["failure_breakdown"]["low_diversity"] >= 1
+
+
+def test_advisory_failure_reason_mapping():
+    assert _advisory_failure_reason("no_api_key") == "no API key"
+    assert _advisory_failure_reason("invalid_endpoint") == "invalid endpoint"
+    assert _advisory_failure_reason("request_failed: timeout") == "request failed"

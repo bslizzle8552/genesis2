@@ -140,5 +140,28 @@ def test_generation_metrics_include_dominance_fields(tmp_path):
         "lineage_extinction_count",
         "surviving_lineage_count",
         "reward_concentration_by_lineage",
+        "births_blocked_by_cooldown",
+        "reward_multiplier_stats",
     ]:
         assert field in row
+
+
+def test_generation_log_tracks_anti_dominance_logging(tmp_path):
+    cfg = SimulationConfig(
+        seed=21,
+        agents=8,
+        generations=5,
+        tasks_per_generation=4,
+        log_dir=str(tmp_path),
+        anti_dominance_enabled=True,
+        diminishing_reward_enabled=True,
+        reproduction_cooldown_enabled=True,
+        reproduction_cooldown_generations=1,
+    )
+    result = SimulationEngine(cfg).run()
+    latest = result["timeline"][-1]
+
+    assert "top_3_lineage_energy_share" in latest
+    assert "births_blocked_by_cooldown" in latest
+    assert "reward_multiplier_stats" in latest
+    assert "applied" in latest["reward_multiplier_stats"]

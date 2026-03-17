@@ -75,6 +75,7 @@ class SimulationEngine:
         self.agent_lifecycle: Dict[str, Dict[str, float | int | None]] = {}
         self.artifact_registry: Dict[str, Dict[str, object]] = {}
         self.last_reproduction_generation_by_agent: Dict[str, int] = {}
+        self._generation_reward_multiplier_stats: Dict[str, float] = {}
 
         for _ in range(config.agents):
             agent_id = self._claim_agent_id()
@@ -223,20 +224,32 @@ class SimulationEngine:
             total_energy += float(agent.energy)
         return lineage_population, dict(lineage_energy_totals), total_energy
 
-    def _reward_multiplier(self, recipient: Agent, base_reward: float, lineage_population: Counter[str], lineage_energy_totals: Dict[str, float], total_energy: float) -> float:
+    def _reward_multiplier(
+        self,
+        recipient: Agent,
+        base_reward: float,
+        lineage_population: Counter[str],
+        lineage_energy_totals: Dict[str, float],
+        total_energy: float,
+    ) -> tuple[float, Dict[str, float]]:
         if not self.config.anti_dominance_enabled or base_reward <= 0:
-            return 1.0
+            return 1.0, {}
         multiplier = 1.0
+        components: Dict[str, float] = {}
         if self.config.diminishing_reward_enabled and self.config.diminishing_reward_k > 0:
-            multiplier *= 1.0 / (1.0 + (max(0.0, recipient.energy) / max(1e-9, self.config.diminishing_reward_k)))
+            factor = 1.0 / (1.0 + (max(0.0, recipient.energy) / max(1e-9, self.config.diminishing_reward_k)))
+            multiplier *= factor
+            components["diminishing_reward"] = factor
         if self.config.lineage_size_penalty_enabled:
             if lineage_population.get(recipient.lineage_id, 0) > self.config.lineage_size_penalty_threshold:
                 multiplier *= self.config.lineage_size_penalty_multiplier
+                components["lineage_size_penalty"] = self.config.lineage_size_penalty_multiplier
         if self.config.lineage_energy_share_penalty_enabled and total_energy > 0:
             lineage_share = lineage_energy_totals.get(recipient.lineage_id, 0.0) / total_energy
             if lineage_share > self.config.lineage_energy_share_penalty_threshold:
                 multiplier *= self.config.lineage_energy_share_penalty_multiplier
-        return max(0.0, float(multiplier))
+                components["lineage_energy_share_penalty"] = self.config.lineage_energy_share_penalty_multiplier
+        return max(0.0, float(multiplier)), components
 
     def _recent_contribution_score(self, agent_id: str, lookback: int = 5) -> float:
         history = self.agent_contribution_history.get(agent_id, [])
@@ -409,19 +422,37 @@ class SimulationEngine:
         agent_lookup = self._agent_lookup()
         lineage_population, lineage_energy_totals, total_energy = self._lineage_context()
         effective_payouts: Dict[str, float] = {}
+        reward_multiplier_log: Dict[str, Dict[str, float | Dict[str, float]]] = {}
         for aid, reward in payouts.items():
             recipient = agent_lookup.get(aid)
             if recipient:
-                reward_multiplier = self._reward_multiplier(recipient, reward, lineage_population, lineage_energy_totals, total_energy)
+                reward_multiplier, multiplier_components = self._reward_multiplier(recipient, reward, lineage_population, lineage_energy_totals, total_energy)
                 effective_reward = reward * reward_multiplier
                 recipient.energy += effective_reward
                 effective_payouts[aid] = effective_reward
+                reward_multiplier_log[aid] = {
+                    "base_reward": round(reward, 4),
+                    "multiplier": round(reward_multiplier, 6),
+                    "effective_reward": round(effective_reward, 4),
+                    "components": {k: round(v, 6) for k, v in multiplier_components.items()},
+                }
+                if self._generation_reward_multiplier_stats and reward > 0:
+                    self._generation_reward_multiplier_stats["applied"] += 1
+                    self._generation_reward_multiplier_stats["total_base_reward"] += reward
+                    self._generation_reward_multiplier_stats["total_effective_reward"] += effective_reward
+                    if reward_multiplier < 1.0:
+                        self._generation_reward_multiplier_stats["reduced"] += 1
+                    elif reward_multiplier > 1.0:
+                        self._generation_reward_multiplier_stats["boosted"] += 1
+                    else:
+                        self._generation_reward_multiplier_stats["neutral"] += 1
                 if aid == integrator.agent_id:
                     self._record_contribution(aid, "solve", reward=effective_reward)
                     self._record_contribution(aid, "integrate")
                 else:
                     self._add_reward(aid, effective_reward)
         chain["payouts"] = {aid: round(amount, 3) for aid, amount in effective_payouts.items()}
+        chain["reward_multipliers"] = reward_multiplier_log
         chain["attribution_log"].append(f"integrate:{integrator.agent_id}")
         return chain
 
@@ -1355,6 +1386,15 @@ class SimulationEngine:
                 a.agent_id: self.agent_contributions.get(a.agent_id, {}).get("meaningful_points", 0.0)
                 for a in self.agents
             }
+            births_blocked_by_cooldown = 0
+            self._generation_reward_multiplier_stats = {
+                "applied": 0,
+                "reduced": 0,
+                "boosted": 0,
+                "neutral": 0,
+                "total_base_reward": 0.0,
+                "total_effective_reward": 0.0,
+            }
             tier_solved = Counter()
             tier_total = Counter()
             domain_solved = Counter()
@@ -1591,10 +1631,15 @@ class SimulationEngine:
                 cooldown_ready = True
                 if self.config.anti_dominance_enabled and self.config.reproduction_cooldown_enabled:
                     cooldown_ready = last_repro is None or (generation - last_repro) > self.config.reproduction_cooldown_generations
-                if (
+                eligible_without_cooldown = (
                     agent.energy >= self.config.reproduction_threshold
                     and agent.generation_age >= 2
                     and generation_points.get(agent.agent_id, 0.0) >= REWARDS["useful_subtask"] * 0.8
+                )
+                if eligible_without_cooldown and not cooldown_ready:
+                    births_blocked_by_cooldown += 1
+                if (
+                    eligible_without_cooldown
                     and cooldown_ready
                 ):
                     parent_energy_before = round(agent.energy, 4)
@@ -1721,6 +1766,14 @@ class SimulationEngine:
                     lineage_reward_totals[parent.lineage_id] += reward
             reward_total_generation = sum(lineage_reward_totals.values())
             reward_share_top_lineage = round(max(lineage_reward_totals.values()) / max(1e-9, reward_total_generation), 6) if lineage_reward_totals else 0.0
+            reward_multiplier_stats = {
+                **self._generation_reward_multiplier_stats,
+                "total_delta": round(self._generation_reward_multiplier_stats["total_effective_reward"] - self._generation_reward_multiplier_stats["total_base_reward"], 6),
+            }
+            reward_multiplier_stats = {
+                key: (round(value, 6) if isinstance(value, float) else value)
+                for key, value in reward_multiplier_stats.items()
+            }
             top_10pct_agent_energy_share = top_share(energies_sorted, 0.10)
             current_lineages = {a.lineage_id for a in self.agents}
             lineage_extinctions = len(previous_lineages - current_lineages)
@@ -1764,6 +1817,8 @@ class SimulationEngine:
                 "cumulative_lineage_extinction_count": cumulative_lineage_extinctions,
                 "surviving_lineage_count": len(current_lineages),
                 "reward_concentration_by_lineage": reward_share_top_lineage,
+                "births_blocked_by_cooldown": births_blocked_by_cooldown,
+                "reward_multiplier_stats": reward_multiplier_stats,
                 "artifact_created": artifact_created,
                 "artifact_reused": artifact_reuse,
                 "collaboration_share_generation": round(sum(1 for p in board.problems if p.resolution_mode == "collaborative" and p.solved) / max(1, sum(1 for p in board.problems if p.solved)), 6),
@@ -1880,6 +1935,9 @@ class SimulationEngine:
                 "role_distribution": role_distribution,
                 "diversity_score": self._diversity_score(),
                 "lineage_count": len(lineages),
+                "top_3_lineage_energy_share": top_3_lineage_energy_share,
+                "births_blocked_by_cooldown": births_blocked_by_cooldown,
+                "reward_multiplier_stats": reward_multiplier_stats,
                 "problem_success_by_tier": {
                     tier: {"solved": tier_solved.get(tier, 0), "total": tier_total.get(tier, 0)}
                     for tier in ["1", "2", "3", "4"]

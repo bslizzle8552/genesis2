@@ -1,0 +1,117 @@
+# Genesis2 Architecture (Reset)
+
+## Philosophy
+
+The system is divided into two layers:
+
+1. Simulator (Genesis2)
+2. External Tuning Loop
+
+The simulator represents the "world".
+The tuning loop represents the "experimenter".
+
+The simulator must remain simple and deterministic.
+The tuning loop handles all decision-making.
+
+---
+
+## Simulator Responsibilities
+
+The simulator must:
+
+- Load a config
+- Run one simulation
+- Output metrics
+- Exit
+
+It must NOT:
+
+- Tune itself
+- Call APIs
+- Contain advisor logic
+- Contain hidden control loops
+
+---
+
+## Required Output
+
+Each run must produce a structured JSON file containing:
+
+- config_used
+- start_population
+- max_population
+- final_population
+- generations_in_target_band
+- viable_lineages
+- late_births
+- dominance_share
+- stability_flag
+- failure_mode
+
+This file is the contract between simulator and tuning loop.
+
+---
+
+## Tuning Loop Responsibilities
+
+The external tuning loop:
+
+- selects configs
+- calls the simulator
+- reads results
+- summarizes runs
+- decides next configs
+- optionally uses AI (Anthropic API)
+
+---
+
+## Tuning Loop Flow
+
+1. Request initial config (API or default)
+2. Run simulation
+3. Read output
+4. Summarize result
+5. Request next config
+6. Repeat
+
+---
+
+## AI Advisor Role
+
+The AI advisor:
+
+- suggests configs
+- explains reasoning
+- predicts effects
+
+The AI does NOT:
+
+- run simulations
+- control execution
+- bypass safety bounds
+
+All outputs must be validated before use.
+
+---
+
+## Design Principles
+
+- Keep the simulator simple
+- Keep the loop understandable
+- Prefer clarity over abstraction
+- Avoid hidden logic
+- Avoid multiple control paths
+- Avoid silent failures
+
+---
+
+## Goal
+
+Build a system where:
+
+- each run is understandable
+- each adjustment is explainable
+- progress is visible
+- failures are diagnosable
+
+This is an experiment system, not a black box.

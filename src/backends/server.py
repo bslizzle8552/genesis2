@@ -8,6 +8,8 @@ from pathlib import Path
 import threading
 from typing import Dict, List
 
+from src.analytics.bvl import events_from_problem_metrics
+
 from src.engine.simulation import SimulationEngine, load_config
 
 
@@ -21,6 +23,8 @@ LAST_RESULT = {
     "result": None,
     "progress": None,
     "error": None,
+    "run_dir": None,
+    "problem_board_events": [],
 }
 RUN_LOCK = threading.Lock()
 
@@ -122,6 +126,8 @@ class GenesisHandler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/api/state":
+            if LAST_RESULT.get("status") == "running" and LAST_RESULT.get("run_dir"):
+                LAST_RESULT["problem_board_events"] = events_from_problem_metrics(LAST_RESULT["run_dir"])
             self._json(LAST_RESULT)
             return
 
@@ -150,6 +156,10 @@ class GenesisHandler(BaseHTTPRequestHandler):
                 LAST_RESULT["status"] = "running"
                 LAST_RESULT["result"] = None
                 LAST_RESULT["error"] = None
+                run_name = f"run_seed{cfg.seed}_g{cfg.generations}_{cfg.run_label}"
+                run_dir = str((Path(cfg.log_dir) / run_name).resolve())
+                LAST_RESULT["run_dir"] = run_dir
+                LAST_RESULT["problem_board_events"] = []
                 LAST_RESULT["progress"] = {
                     "generation": 0,
                     "population": cfg.agents,
@@ -173,6 +183,7 @@ class GenesisHandler(BaseHTTPRequestHandler):
                         result = engine.run(progress_callback=progress_callback)
                         LAST_RESULT["status"] = "done"
                         LAST_RESULT["result"] = result
+                        LAST_RESULT["problem_board_events"] = events_from_problem_metrics(LAST_RESULT.get("run_dir") or "")
                     except Exception as exc:  # pragma: no cover
                         LAST_RESULT["status"] = "error"
                         LAST_RESULT["error"] = str(exc)

@@ -97,7 +97,7 @@ def test_discover_presets_exposes_anti_dominance_ui_fields():
 
 def test_stable_swarm_baseline_uses_internal_rig_baseline():
     baseline = _stable_swarm_baseline()
-    assert baseline["agents"] == 200
+    assert baseline["agents"] == 25
     assert baseline["generations"] == 100
 
 

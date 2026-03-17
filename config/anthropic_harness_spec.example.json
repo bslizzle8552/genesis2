@@ -1,0 +1,32 @@
+{
+  "base_config": "config/default.json",
+  "initial_parameters": {
+    "agents": 25,
+    "generations": 100,
+    "tasks_per_generation": 60,
+    "mutation_rate": 0.28,
+    "diversity_bonus": 0.175,
+    "diversity_min_lineages": 14
+  },
+  "goal": {
+    "target_label": "healthy",
+    "stop_on_labels": [
+      "failed_overshoot",
+      "failed_collapse",
+      "failed_low_diversity",
+      "failed_dominance",
+      "failed_instability",
+      "failed_wrong_start"
+    ],
+    "stop_on_extinction": true,
+    "stop_on_non_target_success": true
+  },
+  "anthropic": {
+    "api_key_env": "ANTHROPIC_API_KEY",
+    "model": "claude-3-5-sonnet-20241022",
+    "temperature": 0.1,
+    "timeout_seconds": 30
+  },
+  "max_cycles": 3,
+  "max_runs_per_cycle": 8
+}

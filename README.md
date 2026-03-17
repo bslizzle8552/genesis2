@@ -102,3 +102,23 @@ You can configure advisory mode in three places:
 3. Optional config file: `config/advisory.json` (or `config/tuner_advisory.json`)
 
 Fallback behavior is deterministic-only tuning when advisory is disabled, endpoint is missing, or API key is absent.
+
+## Anthropic run-to-failure test harness
+
+Use this when you want an automated loop that:
+1) asks Anthropic for bounded parameter recommendations,
+2) runs the simulator until it hits a stop condition,
+3) writes a human-readable incident report,
+4) calls Anthropic again with the incident details for the next recommendation.
+
+Example:
+
+```bash
+cp config/anthropic_harness_spec.example.json config/anthropic_harness_spec.json
+export ANTHROPIC_API_KEY=...your key...
+python -m src.tuner.anthropic_test_harness --spec config/anthropic_harness_spec.json
+```
+
+Outputs are written under `runs/anthropic_harness/<session_id>/`:
+- `incident_report.md` (human-readable summary of the stop-triggering run sequence)
+- `session_output.json` (full machine-readable logs + follow-up Anthropic recommendation payload)

@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import threading
 import time
-from collections import deque
+from collections import Counter, defaultdict, deque
 from statistics import mean
 from typing import Deque, Dict, List
 from urllib import error, request
@@ -102,8 +102,26 @@ def _stable_swarm_baseline() -> Dict[str, object]:
     return params
 
 
+
+
+def _load_advisory_file_defaults() -> Dict[str, object]:
+    candidates = [
+        ROOT / "config" / "advisory.json",
+        ROOT / "config" / "tuner_advisory.json",
+    ]
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                return payload
+        except (json.JSONDecodeError, OSError):
+            continue
+    return {}
 def _advisory_defaults() -> Dict[str, object]:
-    return {
+    file_defaults = _load_advisory_file_defaults()
+    defaults = {
         "advisory_api_enabled": False,
         "advisory_mode": "post_run",
         "advisory_timeout_seconds": 6,
@@ -113,6 +131,8 @@ def _advisory_defaults() -> Dict[str, object]:
         "advisory_endpoint": os.getenv("GENESIS2_ADVISORY_ENDPOINT", ""),
         "advisory_api_key_env": os.getenv("GENESIS2_ADVISORY_API_KEY_ENV", "GENESIS2_ADVISORY_API_KEY"),
     }
+    defaults.update({k: v for k, v in file_defaults.items() if k in defaults})
+    return defaults
 
 
 def _metric_from_timeline(timeline: List[Dict[str, object]], key: str, default: float = 0.0) -> float:
@@ -266,61 +286,390 @@ def _merge_advisory_with_deterministic(current: Dict[str, object], deterministic
     return merged, f"{source}; applied={applied}" if applied else source
 
 
-def _render_human_summary(*, final_outcome: str, best_run: Dict[str, object] | None, failure_modes: Dict[str, int], run_records: List[Dict[str, object]], advisory_usage: Dict[str, object]) -> Dict[str, object]:
-    best_metrics = (best_run or {}).get("metrics", {})
-    best_label = str((best_run or {}).get("label", "unknown"))
+def _classify_run_failure_bucket(metrics: Dict[str, object]) -> str:
+    label = str(metrics.get("label", ""))
+    diagnosis = set(metrics.get("diagnosis", []) or [])
+    if "overshoot" in diagnosis or label == "failed_overshoot":
+        return "overshoot"
+    if "collapse" in diagnosis or label == "failed_collapse":
+        return "collapse"
+    if "early_dominance" in diagnosis or "late_dominance" in diagnosis or label == "failed_dominance":
+        return "dominance"
+    if "low_diversity" in diagnosis or label == "failed_low_diversity":
+        return "low_diversity"
+    if "instability" in diagnosis or label == "failed_instability":
+        return "instability"
+    if "weak_throughput" in diagnosis:
+        return "weak_growth"
+    if label in {"near_healthy", "healthy"}:
+        return "near_success"
+    return "weak_growth"
+
+
+def _score_explanation(metrics: Dict[str, object]) -> Dict[str, object]:
+    positives: List[str] = []
+    negatives: List[str] = []
+    gates = metrics.get("hard_gates", {}) if isinstance(metrics.get("hard_gates"), dict) else {}
+
+    if gates.get("starts_near_25_ok"):
+        positives.append("Started near the intended 25-agent baseline.")
+    else:
+        negatives.append("Start population drifted away from the intended 25-agent baseline.")
+
+    if gates.get("reaches_target_by_generation_80_ok"):
+        positives.append("Reached the target population band by generation 80.")
+    else:
+        negatives.append("Did not reach the 90-110 target band by generation 80.")
+
+    if gates.get("lineage_count_ok"):
+        positives.append("Maintained enough lineages to preserve ecosystem resilience.")
+    else:
+        negatives.append("Lineage count was too low, suggesting weak diversity.")
+
+    if gates.get("top_lineage_share_ok") and gates.get("top_3_lineage_share_ok"):
+        positives.append("Dominance stayed bounded (no lineage captured excessive energy share).")
+    else:
+        negatives.append("Dominance pressure was high; one lineage or top-3 lineages captured too much energy.")
+
+    if gates.get("late_stability_ok"):
+        positives.append("Late generations stayed relatively stable.")
+    else:
+        negatives.append("Late-run population volatility remained high.")
+
+    diagnosis = metrics.get("diagnosis", []) or []
+    biggest_failure = diagnosis[0] if diagnosis else _classify_run_failure_bucket(metrics)
+    if diagnosis:
+        negatives.append(f"Primary failure mode: {biggest_failure}.")
+
     return {
-        "session_outcome_banner": final_outcome,
-        "goal_card": {
-            "goal": "Grow from 25 -> 100 -> stable",
-            "horizon": "100 generations",
-            "stability_target": "90-110 late-run band",
+        "score": metrics.get("score"),
+        "label": metrics.get("label"),
+        "positives": positives,
+        "negatives": negatives,
+        "biggest_failure_mode": biggest_failure,
+    }
+
+
+def _build_run_observability(result: Dict[str, object]) -> Dict[str, object]:
+    agents = list(result.get("agents", []))
+    timeline = list(result.get("timeline", []))
+    generation_count = len(timeline)
+    final_generation = int(timeline[-1].get("generation", generation_count)) if timeline else 0
+
+    by_id = {str(a.get("agent_id")): a for a in agents}
+    offspring_counts: Counter[str] = Counter()
+    for agent in agents:
+        parent_id = agent.get("parent_id")
+        if parent_id:
+            offspring_counts[str(parent_id)] += 1
+
+    helpers_given: Counter[str] = Counter()
+    helpers_received: Counter[str] = Counter()
+    tasks_completed: Counter[str] = Counter()
+    help_rows: List[Dict[str, object]] = []
+
+    for problem in result.get("problems", []):
+        gen = int(problem.get("generation", 0) or 0)
+        participants = list(dict.fromkeys(problem.get("agents_involved", []) or []))
+        if problem.get("solved"):
+            for aid in participants:
+                tasks_completed[str(aid)] += 1
+        chain = problem.get("contribution_chain", []) or []
+        solver_id = participants[0] if participants else None
+        for step in chain:
+            step_type = str(step.get("type", ""))
+            helper_id = str(step.get("agent_id", ""))
+            if step_type in {"collaboration", "verification", "critique", "subtask", "integration"} and helper_id:
+                recipient_id = str(solver_id or "")
+                helpers_given[helper_id] += 1
+                if recipient_id:
+                    helpers_received[recipient_id] += 1
+                help_rows.append(
+                    {
+                        "generation": gen,
+                        "helper_agent_id": helper_id,
+                        "recipient_agent_id": recipient_id,
+                        "task_or_context": str(problem.get("problem_id", "")),
+                        "contribution_type": step_type,
+                        "reward_split_or_transfer": round(float((problem.get("reward_split") or {}).get(helper_id, 0.0)), 4),
+                    }
+                )
+
+    survivors_table: List[Dict[str, object]] = []
+    lineage_births: Counter[str] = Counter()
+    lineage_deaths: Counter[str] = Counter()
+
+    for agent in agents:
+        aid = str(agent.get("agent_id"))
+        lineage = str(agent.get("lineage_id"))
+        lineage_births[lineage] += 1
+        survivors_table.append(
+            {
+                "agent_id": aid,
+                "lineage_id": lineage,
+                "role": agent.get("role"),
+                "age": final_generation - int(agent.get("generation_born", 0) or 0),
+                "final_energy": round(float(agent.get("energy", 0.0)), 4),
+                "offspring_count": int(offspring_counts.get(aid, 0)),
+                "helps_given": int(helpers_given.get(aid, 0)),
+                "helps_received": int(helpers_received.get(aid, 0)),
+                "tasks_completed": int(tasks_completed.get(aid, 0)),
+            }
+        )
+
+    deaths_table: List[Dict[str, object]] = []
+    known_ids = set(by_id.keys())
+    for evt in result.get("board_messages", []):
+        if evt.get("message_type") != "death":
+            continue
+        aid = str(evt.get("agent_id"))
+        if not aid or aid in known_ids:
+            continue
+        lineage = aid.split("-")[0]
+        lineage_deaths[lineage] += 1
+        deaths_table.append(
+            {
+                "agent_id": aid,
+                "lineage_id": lineage,
+                "role": None,
+                "generation_of_death": int(evt.get("generation", 0) or 0),
+                "likely_cause": "energy_depleted",
+                "peak_energy": None,
+                "offspring_count": int(offspring_counts.get(aid, 0)),
+            }
+        )
+
+    reproduction_log = [
+        {
+            "generation": int(e.get("generation", 0) or 0),
+            "parent_agent_id": e.get("parent_id"),
+            "parent_lineage": e.get("parent_lineage_id"),
+            "energy_before": e.get("parent_energy_before"),
+            "energy_after": e.get("parent_energy_after"),
+            "child_agent_id": e.get("child_id"),
+            "child_lineage": e.get("child_lineage_id"),
+            "mutation_summary": f"mutation_rate={e.get('mutation_rate', 0.0)}; applied={bool(e.get('mutation_applied'))}",
+        }
+        for e in (result.get("report", {}).get("observability", {}) and [])
+    ]
+    # Fallback to exported reproduction events if available.
+    if not reproduction_log:
+        path = Path(str(result.get("run_dir", ""))) / "reproduction_events.json"
+        if path.exists():
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            for e in payload.get("events", []):
+                reproduction_log.append(
+                    {
+                        "generation": int(e.get("generation", 0) or 0),
+                        "parent_agent_id": e.get("parent_id"),
+                        "parent_lineage": e.get("parent_lineage_id"),
+                        "energy_before": e.get("parent_energy_before"),
+                        "energy_after": e.get("parent_energy_after"),
+                        "child_agent_id": e.get("child_id"),
+                        "child_lineage": e.get("child_lineage_id"),
+                        "mutation_summary": f"mutation_rate={e.get('mutation_rate', 0.0)}; applied={bool(e.get('mutation_applied'))}",
+                    }
+                )
+                lineage_births[str(e.get("child_lineage_id"))] += 1
+
+    late_cutoff = max(1, final_generation - 20)
+    lineage_survivors: Counter[str] = Counter(str(a.get("lineage_id")) for a in agents)
+    lineage_energy: Counter[str] = Counter()
+    for a in agents:
+        lineage_energy[str(a.get("lineage_id"))] += float(a.get("energy", 0.0))
+    total_energy = sum(lineage_energy.values())
+
+    lineage_peak_dominance: defaultdict[str, float] = defaultdict(float)
+    for step in timeline:
+        lineages = step.get("lineages", {}) or {}
+        pop = max(1, int(step.get("population", 0) or 0))
+        for lid, count in lineages.items():
+            share = float(count) / float(pop)
+            if share > lineage_peak_dominance[str(lid)]:
+                lineage_peak_dominance[str(lid)] = round(share, 6)
+
+    births_by_parent_lineage: Counter[str] = Counter(str(row.get("parent_lineage")) for row in reproduction_log if row.get("parent_lineage"))
+    late_births_by_lineage: Counter[str] = Counter(
+        str(row.get("parent_lineage"))
+        for row in reproduction_log
+        if row.get("parent_lineage") and int(row.get("generation", 0) or 0) >= late_cutoff
+    )
+
+    top_reproducer_by_lineage: Dict[str, str] = {}
+    repro_by_parent: Counter[str] = Counter(str(row.get("parent_agent_id")) for row in reproduction_log if row.get("parent_agent_id"))
+    for row in reproduction_log:
+        lid = str(row.get("parent_lineage"))
+        pid = str(row.get("parent_agent_id"))
+        if not lid or not pid:
+            continue
+        curr = top_reproducer_by_lineage.get(lid)
+        if curr is None or repro_by_parent[pid] > repro_by_parent[curr]:
+            top_reproducer_by_lineage[lid] = pid
+
+    lineage_ids = set(lineage_survivors) | set(lineage_births) | set(lineage_deaths) | set(births_by_parent_lineage)
+    lineage_summary: List[Dict[str, object]] = []
+    for lid in sorted(lineage_ids):
+        extinct_gen = None
+        if lineage_survivors.get(lid, 0) == 0:
+            death_gens = [int(d.get("generation_of_death", 0)) for d in deaths_table if str(d.get("lineage_id")) == lid]
+            extinct_gen = max(death_gens) if death_gens else None
+        lineage_summary.append(
+            {
+                "lineage_id": lid,
+                "births": int(births_by_parent_lineage.get(lid, 0)),
+                "deaths": int(lineage_deaths.get(lid, 0)),
+                "survivors": int(lineage_survivors.get(lid, 0)),
+                "late_births": int(late_births_by_lineage.get(lid, 0)),
+                "top_reproducer": top_reproducer_by_lineage.get(lid),
+                "total_energy_share": round(float(lineage_energy.get(lid, 0.0)) / max(1e-9, total_energy), 6),
+                "peak_dominance_share": round(float(lineage_peak_dominance.get(lid, 0.0)), 6),
+                "extinction_generation_if_any": extinct_gen,
+            }
+        )
+
+    return {
+        "survivors_table": sorted(survivors_table, key=lambda row: row["final_energy"], reverse=True),
+        "deaths_table": sorted(deaths_table, key=lambda row: row["generation_of_death"]),
+        "reproduction_log": sorted(reproduction_log, key=lambda row: row["generation"]),
+        "help_interaction_log": sorted(help_rows, key=lambda row: row["generation"]),
+        "lineage_summary": lineage_summary,
+    }
+
+
+def _render_run_human_report(run_record: Dict[str, object]) -> Dict[str, object]:
+    metrics = dict(run_record.get("metrics", {}))
+    params = dict(run_record.get("params", {}))
+    timeline = list(run_record.get("timeline", []))
+    populations = [int(s.get("population", 0)) for s in timeline]
+    peak_pop = max(populations) if populations else 0
+    peak_gen = (populations.index(peak_pop) + 1) if populations else 0
+    growth_stop_gen = next((idx + 1 for idx, p in enumerate(populations) if p < populations[max(0, idx - 1)] and idx > 0), None) if populations else None
+    late_births = sum(int(s.get("births", 0) or 0) for s in timeline[-20:])
+
+    diagnosis = metrics.get("diagnosis", []) or []
+    failure_bucket = _classify_run_failure_bucket(metrics)
+    what_happened = [
+        f"Started with {params.get('agents', 25)} agents.",
+        f"Peak population was {peak_pop} at generation {peak_gen}.",
+        f"Final population ended at {metrics.get('final_population')} with {metrics.get('lineage_count')} lineages.",
+        f"Late births over final 20 generations: {late_births}.",
+    ]
+    if growth_stop_gen:
+        what_happened.append(f"Growth softened after approximately generation {growth_stop_gen}.")
+    if diagnosis:
+        what_happened.append(f"Observed failure signals: {', '.join(diagnosis)}.")
+
+    why_likely = []
+    if "overshoot" in diagnosis:
+        why_likely.append("Reproduction pressure exceeded ecosystem carrying capacity.")
+    if "collapse" in diagnosis:
+        why_likely.append("Agents likely burned energy faster than they could replenish it.")
+    if "early_dominance" in diagnosis or "late_dominance" in diagnosis:
+        why_likely.append("One lineage captured too much reward/energy share and suppressed alternatives.")
+    if "low_diversity" in diagnosis:
+        why_likely.append("Mutation/diversity pressure was insufficient to sustain multiple viable families.")
+    if "instability" in diagnosis:
+        why_likely.append("Population oscillation remained too high in late generations.")
+    if "weak_throughput" in diagnosis:
+        why_likely.append("Task-solving throughput was too weak to fuel healthy reproduction.")
+    if not why_likely:
+        why_likely.append("Run remained mixed: some gates passed, but stability and lineage balance were not both sustained.")
+
+    score_explanation = _score_explanation(metrics)
+    return {
+        "run_number": run_record.get("run_in_batch"),
+        "result": metrics.get("label"),
+        "failure_bucket": failure_bucket,
+        "what_happened": what_happened,
+        "why_it_likely_happened": why_likely,
+        "score_explanation": score_explanation,
+        "next_change": run_record.get("adjustment_reason", "No next change recorded."),
+        "observability": _build_run_observability(run_record.get("result", {})),
+    }
+
+
+def _render_human_summary(*, final_outcome: str, best_run: Dict[str, object] | None, failure_modes: Dict[str, int], run_records: List[Dict[str, object]], advisory_usage: Dict[str, object]) -> Dict[str, object]:
+    run_summaries = [_render_run_human_report(rec) for rec in run_records]
+    best_metrics = (best_run or {}).get("metrics", {})
+    best_run_summary = _render_run_human_report(best_run) if best_run else None
+
+    failure_counts = {
+        "overshoot": 0,
+        "collapse": 0,
+        "dominance": 0,
+        "low_diversity": 0,
+        "instability": 0,
+        "weak_growth": 0,
+        "near_success": 0,
+    }
+    for rec in run_records:
+        bucket = _classify_run_failure_bucket(dict(rec.get("metrics", {})))
+        failure_counts[bucket] = failure_counts.get(bucket, 0) + 1
+
+    parameter_journey: List[Dict[str, object]] = []
+    prev_params: Dict[str, object] | None = None
+    for rec in run_records:
+        params = dict(rec.get("params", {}))
+        delta = {}
+        explanation = []
+        if prev_params is not None:
+            for key in ["reproduction_threshold", "mutation_rate", "upkeep_cost", "tasks_per_generation", "diversity_bonus", "diversity_min_lineages"]:
+                if prev_params.get(key) != params.get(key):
+                    delta[key] = {"from": prev_params.get(key), "to": params.get(key)}
+            diag = set(rec.get("metrics", {}).get("diagnosis", []) or [])
+            if "overshoot" in diag and "reproduction_threshold" in delta:
+                explanation.append("Reproduction threshold increased to curb early over-birth and overshoot.")
+            if "collapse" in diag and ("upkeep_cost" in delta or "reproduction_threshold" in delta):
+                explanation.append("Survival pressure was relaxed to reduce collapse risk.")
+            if "low_diversity" in diag and ("mutation_rate" in delta or "diversity_bonus" in delta):
+                explanation.append("Mutation/diversity pressure increased to rebuild lineage variety.")
+            if "instability" in diag and ("mutation_rate" in delta or "tasks_per_generation" in delta):
+                explanation.append("Volatility controls were tightened to smooth late-run swings.")
+        parameter_journey.append(
+            {
+                "run": rec.get("run_in_batch"),
+                "score": rec.get("score"),
+                "label": rec.get("label"),
+                "changes": delta,
+                "plain_english_reason": rec.get("adjustment_reason") or ("; ".join(explanation) if explanation else "Bounded local step update."),
+            }
+        )
+        prev_params = params
+
+    recommendation = "keep tuning"
+    if str(final_outcome).lower().startswith("stable swarm achieved"):
+        recommendation = "freeze this preset as current best"
+    elif best_run and float(best_run.get("score", 0.0)) >= 75:
+        recommendation = "freeze this preset as current best"
+    elif failure_counts["collapse"] + failure_counts["overshoot"] > max(1, len(run_records) // 2):
+        recommendation = "abandon this region of parameter space"
+
+    return {
+        "executive_summary": {
+            "stable_swarm_achieved": final_outcome == "Stable swarm achieved",
+            "outcome": final_outcome,
+            "runs_attempted": len(run_records),
+            "best_run_number": best_run.get("run_in_batch") if best_run else None,
+            "best_score": best_run.get("score") if best_run else None,
+            "overall_learning": "Bounded deterministic tuning mapped which levers shift growth, dominance, and late-run stability.",
+        },
+        "best_run_summary": best_run_summary,
+        "failure_breakdown": failure_counts,
+        "parameter_evolution": parameter_journey,
+        "run_level_reports": run_summaries,
+        "final_recommendation": {
+            "action": recommendation,
+            "next_likely_lever": "reproduction_threshold + diversity_bonus" if failure_counts.get("dominance", 0) else "upkeep_cost + tasks_per_generation",
+            "api_note": advisory_usage.get("operator_summaries", []),
         },
         "best_run_card": {
             "best_score": (best_run or {}).get("score"),
             "final_population": best_metrics.get("final_population"),
-            "peak_population": best_metrics.get("peak_population"),
-            "generation_of_peak_population": best_metrics.get("generation_of_peak_population"),
             "lineage_count": best_metrics.get("lineage_count"),
             "diversity_score": best_metrics.get("diversity_score"),
-            "top_lineage_share": best_metrics.get("top_lineage_share"),
-            "top_3_lineage_share": best_metrics.get("top_3_lineage_share"),
-            "target_band_reached": best_metrics.get("hard_gates", {}).get("reaches_target_by_generation_80_ok"),
-            "target_band_sustained": best_metrics.get("passed_hard_gates"),
-            "outcome_plain_english": PLAIN_LABELS.get(best_label, best_label),
-            "why_best": "Highest composite run score under safety gates.",
+            "outcome_plain_english": PLAIN_LABELS.get(str((best_run or {}).get("label", "unknown")), "unknown"),
         },
-        "failure_summary_card": {
-            "overshoot_failures": failure_modes.get("failed_overshoot", 0),
-            "collapse_failures": failure_modes.get("failed_collapse", 0),
-            "low_diversity_failures": failure_modes.get("failed_low_diversity", 0),
-            "dominance_failures": failure_modes.get("failed_dominance", 0),
-            "instability_failures": failure_modes.get("failed_instability", 0),
-            "near_healthy_runs": failure_modes.get("near_healthy", 0),
-            "healthy_runs": failure_modes.get("healthy", 0),
-        },
-        "parameter_journey": [
-            {
-                "run": rec.get("run_in_batch"),
-                "reproduction_threshold": rec.get("params", {}).get("reproduction_threshold"),
-                "mutation_rate": rec.get("params", {}).get("mutation_rate"),
-                "upkeep_cost": rec.get("params", {}).get("upkeep_cost"),
-                "tasks_per_generation": rec.get("params", {}).get("tasks_per_generation"),
-                "diversity_bonus": rec.get("params", {}).get("diversity_bonus"),
-                "diversity_min_lineages": rec.get("params", {}).get("diversity_min_lineages"),
-            }
-            for rec in run_records
-        ],
-        "score_progression_chart": [{"run": rec.get("run_in_batch"), "score": rec.get("score")} for rec in run_records],
-        "population_outcome_chart": [{"run": rec.get("run_in_batch"), "final_population": rec.get("metrics", {}).get("final_population")} for rec in run_records],
-        "recommendation_card": {
-            "summary": "Next best direction is lower growth pressure and stronger diversity support.",
-            "api_note": advisory_usage.get("operator_summaries", []),
-        },
-        "plain_english_run_explanations": PLAIN_LABELS,
-        "advanced_details": {
-            "raw_json_available": True,
-        },
+        "advanced_details": {"raw_json_available": True},
     }
 
 
@@ -661,6 +1010,9 @@ def _run_find_stable_swarm(max_runs: int, advisory_settings: Dict[str, object] |
                 "score": metrics["score"],
                 "label": metrics["label"],
                 "metrics": metrics,
+                "timeline": timeline,
+                "result": result,
+                "adjustment_reason": "pending",
             }
             prior_score = float(run_records[-1]["score"]) if run_records else None
             run_record["score_delta"] = round(float(metrics["score"]) - prior_score, 4) if prior_score is not None else 0.0
@@ -761,6 +1113,7 @@ def _run_find_stable_swarm(max_runs: int, advisory_settings: Dict[str, object] |
             run_records[-1]["advisory"] = advice_record
             run_records[-1]["final_applied_config"] = updated
             TUNING_STATE["latest_adjustment_reason"] = reason
+            run_records[-1]["adjustment_reason"] = reason
             TUNING_STATE["advisory_usage"] = {"calls": advisory_calls, "accepted": advisory_accepted, "operator_summaries": operator_summaries[-5:]}
 
             diagnoses = set(metrics.get("diagnosis", []))
@@ -892,6 +1245,13 @@ def _build_tuning_summary(*, session_id: str, started_at: str, elapsed_seconds: 
     dominant = sorted(failure_modes.items(), key=lambda kv: kv[1], reverse=True)
     top_candidates = sorted(candidate_configs, key=lambda c: c["score"], reverse=True)[:3]
     suggested = "Increase anti-dominance pressure and reduce mutation volatility" if failure_modes.get("failed_overshoot", 0) > failure_modes.get("failed_collapse", 0) else "Increase initial energy and lower reproduction threshold to avoid collapse"
+    human = _render_human_summary(
+        final_outcome=final_outcome,
+        best_run=best_run,
+        failure_modes=failure_modes,
+        run_records=run_records,
+        advisory_usage=advisory_usage or {"calls": 0, "accepted": 0, "operator_summaries": []},
+    )
     return {
         "tuning_session_id": session_id,
         "mode": "find_stable_swarm",
@@ -911,6 +1271,7 @@ def _build_tuning_summary(*, session_id: str, started_at: str, elapsed_seconds: 
         "advisory_settings": advisory_settings or _advisory_defaults(),
         "advisory_usage": advisory_usage or {"calls": 0, "accepted": 0, "operator_summaries": []},
         "starting_population_root_cause": "Find Stable Swarm UI copy still said 100 agents; tuning execution always now force-clamps agents=25 in baseline, run loop, and repeatability path.",
+        "human_readable_summary": human,
     }
 
 
@@ -919,26 +1280,55 @@ def _build_markdown_report(summary: Dict[str, object]) -> str:
     candidates = summary.get("top_candidate_configs") or []
     failures = summary.get("dominant_failure_modes") or []
     advisory = summary.get("advisory_usage") or {}
+    human = summary.get("human_readable_summary") or {}
+    exec_summary = human.get("executive_summary") or {}
+    best_run_summary = human.get("best_run_summary") or {}
+
     lines = [
         f"# Tuning Session Report - {summary.get('tuning_session_id')}",
         "",
+        "## A. Executive Summary",
+        f"- Stable swarm achieved: **{exec_summary.get('stable_swarm_achieved', False)}**",
         f"- Outcome: **{summary.get('final_outcome')}**",
-        f"- Total runs: **{summary.get('total_runs_executed')}**",
-        f"- Best score: **{summary.get('best_score')}**",
+        f"- Runs attempted: **{summary.get('total_runs_executed')}**",
+        f"- Best run: **Run {exec_summary.get('best_run_number')}** (score={summary.get('best_score')})",
+        f"- Overall learning: {exec_summary.get('overall_learning', 'See run-level summaries below.')}",
         "",
-        "## Goal Profile",
-        "- Goal: Grow from 25 -> 100 -> stable",
-        "- Horizon: 100 generations",
-        "- Stability target: 90-110 late-run band",
-        "",
-        "## Best Run",
+        "## B. Best Run Summary",
+        f"- Why it was best: {best_run_summary.get('score_explanation', {}).get('positives', ['Highest score under current gates.'])[0]}",
+        f"- Biggest remaining failure mode: {best_run_summary.get('score_explanation', {}).get('biggest_failure_mode', 'n/a')}",
         f"- Config: `{json.dumps(best, sort_keys=True)}`",
+        "",
+        "## C. Failure Breakdown Across Runs",
+    ]
+    for bucket, count in (human.get("failure_breakdown") or {}).items():
+        lines.append(f"- {bucket}: {count}")
+
+    lines += ["", "## D. Parameter Evolution"]
+    for row in human.get("parameter_evolution", [])[:20]:
+        lines.append(f"- Run {row.get('run')}: {row.get('plain_english_reason')}")
+
+    lines += ["", "## E. Final Recommendation", f"- {human.get('final_recommendation', {}).get('action', summary.get('suggested_next_tuning_direction'))}"]
+
+    lines += ["", "## Run-Level Human Reports"]
+    for run in human.get("run_level_reports", []):
+        lines.append(f"### Run {run.get('run_number')} Summary")
+        lines.append("- What happened:")
+        for item in run.get("what_happened", []):
+            lines.append(f"  - {item}")
+        lines.append("- Why it likely happened:")
+        for item in run.get("why_it_likely_happened", []):
+            lines.append(f"  - {item}")
+        lines.append(f"- What tuner changed next: {run.get('next_change')}")
+
+    lines += [
         "",
         "## Top Candidate Configs",
     ]
     for idx, row in enumerate(candidates[:3], start=1):
         lines.append(f"- {idx}. score={row.get('score')} label={row.get('label')} params={json.dumps(row.get('params', {}), sort_keys=True)}")
-    lines += ["", "## Failure Distribution"]
+
+    lines += ["", "## Failure Distribution (Raw Labels)"]
     for row in failures:
         lines.append(f"- {row.get('label')}: {row.get('count')}")
     lines += [
@@ -947,11 +1337,14 @@ def _build_markdown_report(summary: Dict[str, object]) -> str:
         f"- Calls: {advisory.get('calls', 0)}",
         f"- Accepted merges: {advisory.get('accepted', 0)}",
         f"- Operator summaries: {advisory.get('operator_summaries', [])}",
+        f"- API key env var: {summary.get('advisory_settings', {}).get('advisory_api_key_env', 'GENESIS2_ADVISORY_API_KEY')}",
         "",
-        "## Final Recommendation",
-        f"- {summary.get('suggested_next_tuning_direction')}",
+        "## Raw JSON",
+        f"- Session summary JSON: `final_session_summary.json`",
+        f"- Runs JSONL: `runs.jsonl`",
     ]
     return "\n".join(lines) + "\n"
+
 
 
 class GenesisHandler(BaseHTTPRequestHandler):

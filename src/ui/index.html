@@ -59,8 +59,12 @@
       <label>Lineage penalty enabled<select id="lineage_size_penalty_enabled"><option value="true">true</option><option value="false">false</option></select></label>
       <label>Lineage penalty threshold<input id="lineage_size_penalty_threshold" type="number" value="45"></label>
       <label>Lineage penalty strength<input id="lineage_size_penalty_multiplier" type="number" step="0.01" value="0.85"></label>
+      <label>Lineage energy-share penalty enabled<select id="lineage_energy_share_penalty_enabled"><option value="true">true</option><option value="false">false</option></select></label>
+      <label>Lineage energy-share threshold<input id="lineage_energy_share_penalty_threshold" type="number" step="0.01" value="0.3"></label>
+      <label>Lineage energy-share strength<input id="lineage_energy_share_penalty_multiplier" type="number" step="0.01" value="0.8"></label>
       <label>Reproduction cooldown enabled<select id="reproduction_cooldown_enabled"><option value="true">true</option><option value="false">false</option></select></label>
       <label>Reproduction cooldown (generations)<input id="reproduction_cooldown_generations" type="number" value="2"></label>
+      <label>Reproduction cost<input id="reproduction_cost" type="number" step="0.1" value="32"></label>
       <label>Reproduction energy split<input id="child_energy_fraction" type="number" step="0.01" min="0.01" max="0.99" value="0.5"></label>
       <label>Tier 1 mix<input id="tier1" type="number" step="0.01" value="0.34"></label>
       <label>Tier 2 mix<input id="tier2" type="number" step="0.01" value="0.31"></label>
@@ -138,7 +142,7 @@
 </div>
 
 <script>
-const fields=["seed","agents","generations","initial_energy","reproduction_threshold","mutation_rate","upkeep_cost","tasks_per_generation","diversity_bonus","diversity_min_lineages","immigrant_injection_count","anti_dominance_enabled","diminishing_reward_enabled","diminishing_reward_k","lineage_size_penalty_enabled","lineage_size_penalty_threshold","lineage_size_penalty_multiplier","reproduction_cooldown_enabled","reproduction_cooldown_generations","child_energy_fraction"];
+const fields=["seed","agents","generations","initial_energy","reproduction_threshold","mutation_rate","upkeep_cost","tasks_per_generation","diversity_bonus","diversity_min_lineages","immigrant_injection_count","anti_dominance_enabled","diminishing_reward_enabled","diminishing_reward_k","lineage_size_penalty_enabled","lineage_size_penalty_threshold","lineage_size_penalty_multiplier","lineage_energy_share_penalty_enabled","lineage_energy_share_penalty_threshold","lineage_energy_share_penalty_multiplier","reproduction_cooldown_enabled","reproduction_cooldown_generations","reproduction_cost","child_energy_fraction"];
 let presetMap={}, currentResult=null;
 let selectedPresetName='custom';
 const v=(id)=>document.getElementById(id).value;
@@ -170,8 +174,8 @@ function unifiedConfigFromUI(){
     anti_dominance: {
       enabled: b('anti_dominance_enabled'),
       diminishing_rewards: { enabled: b('diminishing_reward_enabled'), k: n('diminishing_reward_k') },
-      lineage_penalty: { enabled: b('lineage_size_penalty_enabled'), threshold: n('lineage_size_penalty_threshold'), strength: n('lineage_size_penalty_multiplier') },
-      reproduction: { cooldown_enabled: b('reproduction_cooldown_enabled'), cooldown_generations: n('reproduction_cooldown_generations'), energy_split: n('child_energy_fraction') },
+      lineage_penalty: { enabled: b('lineage_size_penalty_enabled'), threshold: n('lineage_size_penalty_threshold'), strength: n('lineage_size_penalty_multiplier'), energy_share_enabled: b('lineage_energy_share_penalty_enabled'), energy_share_threshold: n('lineage_energy_share_penalty_threshold'), energy_share_strength: n('lineage_energy_share_penalty_multiplier') },
+      reproduction: { cooldown_enabled: b('reproduction_cooldown_enabled'), cooldown_generations: n('reproduction_cooldown_generations'), cost: n('reproduction_cost'), energy_split: n('child_energy_fraction') },
     },
     tier_mix: { t1: n('tier1'), t2: n('tier2'), t3: n('tier3'), t4: n('tier4') },
   };
@@ -203,8 +207,12 @@ function applyUnifiedConfig(cfg){
   if(lin.enabled!==undefined) document.getElementById('lineage_size_penalty_enabled').value=String(lin.enabled);
   if(lin.threshold!==undefined) document.getElementById('lineage_size_penalty_threshold').value=String(lin.threshold);
   if(lin.strength!==undefined) document.getElementById('lineage_size_penalty_multiplier').value=String(lin.strength);
+  if(lin.energy_share_enabled!==undefined) document.getElementById('lineage_energy_share_penalty_enabled').value=String(lin.energy_share_enabled);
+  if(lin.energy_share_threshold!==undefined) document.getElementById('lineage_energy_share_penalty_threshold').value=String(lin.energy_share_threshold);
+  if(lin.energy_share_strength!==undefined) document.getElementById('lineage_energy_share_penalty_multiplier').value=String(lin.energy_share_strength);
   if(rep.cooldown_enabled!==undefined) document.getElementById('reproduction_cooldown_enabled').value=String(rep.cooldown_enabled);
   if(rep.cooldown_generations!==undefined) document.getElementById('reproduction_cooldown_generations').value=String(rep.cooldown_generations);
+  if(rep.cost!==undefined) document.getElementById('reproduction_cost').value=String(rep.cost);
   if(rep.energy_split!==undefined) document.getElementById('child_energy_fraction').value=String(rep.energy_split);
   if(mix.t1!==undefined) document.getElementById('tier1').value=String(mix.t1);
   if(mix.t2!==undefined) document.getElementById('tier2').value=String(mix.t2);
@@ -322,7 +330,7 @@ function renderAgents(r){ const sel=document.getElementById('agentSelect'); sel.
 function renderAll(r){ currentResult=r; renderDashboard(r); renderReport(r); renderBoard(r); renderAgents(r); document.getElementById('markdownOut').textContent=`Summary file: ${r.markdown_summary_path}`; refreshLedger(); renderProblemBoard(r.problem_board_events||[]); }
 
 async function startRun(){
-  const payload={ preset:v('preset'), preset_name:selectedPresetName, seed:n('seed'), agents:n('agents'), generations:n('generations'), initial_energy:n('initial_energy'), reproduction_threshold:n('reproduction_threshold'), mutation_rate:n('mutation_rate'), upkeep_cost:n('upkeep_cost'), tasks_per_generation:n('tasks_per_generation'), diversity_bonus:n('diversity_bonus'), diversity_min_lineages:n('diversity_min_lineages'), immigrant_injection_count:n('immigrant_injection_count'), anti_dominance_enabled:b('anti_dominance_enabled'), diminishing_reward_enabled:b('diminishing_reward_enabled'), diminishing_reward_k:n('diminishing_reward_k'), lineage_size_penalty_enabled:b('lineage_size_penalty_enabled'), lineage_size_penalty_threshold:n('lineage_size_penalty_threshold'), lineage_size_penalty_multiplier:n('lineage_size_penalty_multiplier'), reproduction_cooldown_enabled:b('reproduction_cooldown_enabled'), reproduction_cooldown_generations:n('reproduction_cooldown_generations'), child_energy_fraction:n('child_energy_fraction'), tier_mix:{"1":n('tier1'),"2":n('tier2'),"3":n('tier3'),"4":n('tier4')} };
+  const payload={ preset:v('preset'), preset_name:selectedPresetName, seed:n('seed'), agents:n('agents'), generations:n('generations'), initial_energy:n('initial_energy'), reproduction_threshold:n('reproduction_threshold'), mutation_rate:n('mutation_rate'), upkeep_cost:n('upkeep_cost'), tasks_per_generation:n('tasks_per_generation'), diversity_bonus:n('diversity_bonus'), diversity_min_lineages:n('diversity_min_lineages'), immigrant_injection_count:n('immigrant_injection_count'), anti_dominance_enabled:b('anti_dominance_enabled'), diminishing_reward_enabled:b('diminishing_reward_enabled'), diminishing_reward_k:n('diminishing_reward_k'), lineage_size_penalty_enabled:b('lineage_size_penalty_enabled'), lineage_size_penalty_threshold:n('lineage_size_penalty_threshold'), lineage_size_penalty_multiplier:n('lineage_size_penalty_multiplier'), lineage_energy_share_penalty_enabled:b('lineage_energy_share_penalty_enabled'), lineage_energy_share_penalty_threshold:n('lineage_energy_share_penalty_threshold'), lineage_energy_share_penalty_multiplier:n('lineage_energy_share_penalty_multiplier'), reproduction_cooldown_enabled:b('reproduction_cooldown_enabled'), reproduction_cooldown_generations:n('reproduction_cooldown_generations'), reproduction_cost:n('reproduction_cost'), child_energy_fraction:n('child_energy_fraction'), tier_mix:{"1":n('tier1'),"2":n('tier2'),"3":n('tier3'),"4":n('tier4')} };
   const res=await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   const data=await res.json(); if(data.error) throw new Error(data.error);
 }

@@ -16,7 +16,17 @@ from src.agents.agent import Agent
 from src.agents.genome import Genome
 from src.agents.reproduction import reproduce
 from src.analytics.logger import SimulationLogger, summarize_energy
-from src.analytics.metrics import detect_phase, gini, lineage_energy, percentile, role_energy, top_share
+from src.analytics.metrics import (
+    detect_phase,
+    dominance_pressure_index,
+    energy_distribution_metrics,
+    gini,
+    lineage_energy,
+    percentile,
+    role_energy,
+    safe_ratio,
+    top_share,
+)
 from src.analytics.data_layer import EventDataLayer, RunDataReader, reconstruct_generation
 from src.world.board import WorldBoard
 from src.world.economy import COSTS, REWARDS
@@ -27,8 +37,20 @@ ROLE_BUCKETS = ["solver", "verifier", "decomposer", "critic", "coordinator"]
 TIER_BOUNTIES = {1: 22.0, 2: 30.0, 3: 46.0, 4: 70.0}
 
 
+def to_unified_config_dict(config: "SimulationConfig") -> Dict[str, Any]:
+    payload = asdict(config)
+    payload["tier_mix"] = dict(config.tier_mix or {"1": 0.34, "2": 0.31, "3": 0.21, "4": 0.14})
+    return payload
+
+
+def config_hash_from_unified(unified_config: Dict[str, Any]) -> str:
+    serialized = json.dumps(unified_config, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:10]
+
+
 @dataclass
 class SimulationConfig:
+    preset_name: str = "default"
     seed: int = 42
     agents: int = 10
     generations: int = 50
@@ -61,6 +83,10 @@ class SimulationConfig:
     reproduction_cooldown_generations: int = 2
     reproduction_cost: float = 32.0
     child_energy_fraction: float = 0.5
+    ecosystem_target_min_lineages: int = 4
+    ecosystem_mean_median_lower: float = 1.0
+    ecosystem_mean_median_upper: float = 3.0
+    inequality_extreme_threshold: float = 8.0
     visualization_snapshots_enabled: bool = True
     visualization_snapshot_interval: int = 1
 
@@ -2498,8 +2524,12 @@ def load_config(path: str | Path) -> SimulationConfig:
             "lineage_size_penalty_enabled": anti_lineage.get("enabled", False),
             "lineage_size_penalty_threshold": anti_lineage.get("threshold", 45),
             "lineage_size_penalty_multiplier": anti_lineage.get("strength", 0.85),
+            "lineage_energy_share_penalty_enabled": anti_lineage.get("energy_share_enabled", False),
+            "lineage_energy_share_penalty_threshold": anti_lineage.get("energy_share_threshold", 0.30),
+            "lineage_energy_share_penalty_multiplier": anti_lineage.get("energy_share_strength", 0.80),
             "reproduction_cooldown_enabled": anti_repro.get("cooldown_enabled", False),
             "reproduction_cooldown_generations": anti_repro.get("cooldown_generations", 2),
+            "reproduction_cost": anti_repro.get("cost", 32.0),
             "child_energy_fraction": anti_repro.get("energy_split", 0.5),
             "tier_mix": {
                 "1": tier_mix.get("t1", 0.34),

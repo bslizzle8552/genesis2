@@ -33,3 +33,24 @@ The default config is already set to:
 
 The UI automatically loads every JSON file in `config/` as a run preset (for example `experiment_fast.json`, `experiment_default.json`, `experiment_stress.json`).
 You can still override seed/agent/generation values directly before pressing run.
+
+## Healthy swarm scoring harness
+
+Run a scored sweep:
+
+```bash
+python -m src.main --experiment-config config/experiment_healthy_swarm_matrix_v1.json
+```
+
+Run anti-dominance family matrix (baseline + 5 policy families):
+
+```bash
+python -m src.main --anti-dominance-config config/experiment_anti_dominance_matrix_v1.json
+```
+
+Each harness run now writes:
+- `comparison_summary.json` (legacy run list + scores)
+- `runs_detailed.json` (per-trial diagnostics + component score breakdown)
+- `config_aggregates.json` (mean/std/min/max score by config)
+- `leaderboard.json` (ranked configs)
+- `healthy_swarm_score.json` inside each run directory

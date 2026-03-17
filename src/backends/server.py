@@ -11,6 +11,7 @@ from pathlib import Path
 import threading
 import time
 from collections import Counter, defaultdict, deque
+import csv
 from statistics import mean
 from typing import Deque, Dict, List
 from urllib.parse import urlparse
@@ -76,6 +77,7 @@ TUNING_STATE = {
     "advisor_failure_reason": None,
     "advisory_calls_made": 0,
     "advisory_events": [],
+    "last_advisor_status": "idle",
     "human_readable_summary": None,
     "human_readable_report_path": None,
 }
@@ -87,6 +89,19 @@ GOAL_PROFILE = {
     "target_reach_generation": 80,
     "stability_band": [90, 110],
     "horizon_generations": 100,
+}
+
+LEVER_SPECS: Dict[str, Dict[str, object]] = {
+    "initial_energy": {"min": 40, "max": 240, "max_step": 20, "meaning": "Starting energy budget per agent; higher values improve early survival and reproduction."},
+    "upkeep_cost": {"min": 2, "max": 14, "max_step": 2, "meaning": "Per-generation energy cost; higher values suppress runaway growth."},
+    "tasks_per_generation": {"min": 20, "max": 120, "max_step": 10, "meaning": "Task throughput available each generation; influences rewards and ecosystem carrying capacity."},
+    "reproduction_threshold": {"min": 90, "max": 220, "max_step": 10, "meaning": "Energy threshold required to reproduce; higher values slow births."},
+    "mutation_rate": {"min": 0.05, "max": 0.5, "max_step": 0.04, "meaning": "Mutation intensity; higher values raise exploration/diversity but can increase instability."},
+    "diversity_bonus": {"min": 0.05, "max": 0.8, "max_step": 0.06, "meaning": "Reward bonus for diverse participation and collaboration."},
+    "diversity_min_lineages": {"min": 8, "max": 28, "max_step": 2, "meaning": "Minimum lineage target for diversity incentives and penalties."},
+    "lineage_size_penalty_threshold": {"min": 10, "max": 80, "max_step": 5, "meaning": "Population size threshold where lineage-size penalties begin."},
+    "lineage_energy_share_penalty_threshold": {"min": 0.2, "max": 0.8, "max_step": 0.05, "meaning": "Energy share threshold for anti-dominance penalties."},
+    "reproduction_cooldown_generations": {"min": 1, "max": 8, "max_step": 2, "meaning": "Cooldown between reproductions when anti-dominance controls are enabled."},
 }
 
 PLAIN_LABELS = {
@@ -129,19 +144,249 @@ def _advisory_defaults() -> Dict[str, object]:
     file_defaults = _load_advisory_file_defaults()
     defaults = {
         "advisory_api_enabled": False,
-        "advisory_mode": "post_run",
-        "advisory_timeout_seconds": 6,
+        "advisory_timeout_seconds": 20,
         "advisory_max_calls_per_session": 20,
-        "advisory_model_name": os.getenv("GENESIS2_ADVISORY_MODEL", "local-advisor"),
+        "advisory_model_name": os.getenv("GENESIS2_ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"),
         "advisory_temperature": 0.1,
-        "advisory_endpoint": os.getenv("GENESIS2_ADVISORY_ENDPOINT", ""),
-        "advisory_api_key_env": os.getenv("GENESIS2_ADVISORY_API_KEY_ENV", "GENESIS2_ADVISORY_API_KEY"),
         "advisory_api_key": "",
+        "advisory_api_key_env": os.getenv("GENESIS2_ADVISORY_API_KEY_ENV", "ANTHROPIC_API_KEY"),
+        "advisory_debug": False,
     }
     defaults.update({k: v for k, v in file_defaults.items() if k in defaults})
     return defaults
 
 
+
+
+def _lever_snapshot(current: Dict[str, object]) -> List[Dict[str, object]]:
+    rows: List[Dict[str, object]] = []
+    for name, spec in LEVER_SPECS.items():
+        rows.append({
+            "name": name,
+            "current_value": current.get(name),
+            "min": spec["min"],
+            "max": spec["max"],
+            "max_step_per_run": spec["max_step"],
+            "meaning": spec["meaning"],
+        })
+    return rows
+
+
+def _advisor_system_prompt() -> str:
+    return (
+        "You are Genesis2 Adaptive Tuning Advisor. You only recommend bounded simulator configs; you do not run simulations. "
+        "Always return strict JSON with keys: recommended_config, rationale, predicted_effects, confidence, avoid."
+    )
+
+
+def _advisor_user_prompt_initial(current: Dict[str, object], run_records: List[Dict[str, object]]) -> str:
+    payload = {
+        "objective": "Find a healthy, diverse, sustainable swarm via iterative simulation tuning.",
+        "target_definition": {
+            "start_agents": 25,
+            "grow_to_100_by_generation": 80,
+            "stability_band": [90, 110],
+            "requirements": [
+                "maintain multiple viable lineages",
+                "avoid founder lock-in",
+                "avoid runaway dominance",
+                "preserve meaningful late reproduction",
+                "preserve collaboration and specialization",
+                "healthy diverse sustainable ecology",
+            ],
+        },
+        "levers": _lever_snapshot(current),
+        "previous_best_configs": [
+            {"run": r.get("run_in_batch"), "score": r.get("score"), "config": r.get("params", {})}
+            for r in sorted(run_records, key=lambda x: float(x.get("score", 0.0)), reverse=True)[:3]
+        ],
+        "request": "Recommend a starting configuration within bounds and include short plain-English rationale.",
+        "response_format": {
+            "recommended_config": {},
+            "rationale": "...",
+            "predicted_effects": ["..."],
+            "confidence": "low|medium|high",
+            "avoid": ["..."],
+        },
+    }
+    return json.dumps(payload)
+
+
+def _advisor_user_prompt_next(current: Dict[str, object], metrics: Dict[str, object], run_records: List[Dict[str, object]]) -> str:
+    compact_history = [
+        {
+            "run": r.get("run_in_batch"),
+            "score": r.get("score"),
+            "label": r.get("label"),
+            "failure_modes": r.get("metrics", {}).get("diagnosis", []),
+            "changed_parameters": r.get("changed_parameters", {}),
+        }
+        for r in run_records[-8:]
+    ]
+    payload = {
+        "objective": "Find stable swarm dynamics with bounded iterative config updates.",
+        "target_definition": GOAL_PROFILE,
+        "levers": _lever_snapshot(current),
+        "latest_run_summary": {
+            "config_used": current,
+            "key_metrics": metrics,
+            "failure_mode_classification": metrics.get("diagnosis", []),
+            "what_changed_from_prior_run": run_records[-1].get("changed_parameters", {}) if run_records else {},
+        },
+        "history": compact_history,
+        "request": "Recommend the next bounded config adjustment. Avoid repeating obviously bad directions.",
+        "response_format": {
+            "recommended_config": {},
+            "rationale": "...",
+            "predicted_effects": ["..."],
+            "confidence": "low|medium|high",
+            "avoid": ["..."],
+        },
+    }
+    return json.dumps(payload)
+
+
+def _validate_advisor_json(parsed: Dict[str, object], current: Dict[str, object]) -> tuple[Dict[str, object], List[str], bool]:
+    rec = parsed.get("recommended_config") if isinstance(parsed, dict) else None
+    if not isinstance(rec, dict):
+        return {}, ["missing recommended_config object"], False
+    accepted: Dict[str, object] = {}
+    reasons: List[str] = []
+    for key, proposed in rec.items():
+        if key not in LEVER_SPECS:
+            reasons.append(f"{key}: unknown lever")
+            continue
+        spec = LEVER_SPECS[key]
+        try:
+            value = float(proposed)
+        except (TypeError, ValueError):
+            reasons.append(f"{key}: non-numeric value")
+            continue
+        curr = float(current.get(key, value))
+        if value < float(spec["min"]) or value > float(spec["max"]):
+            reasons.append(f"{key}: out of bounds")
+            continue
+        if abs(value - curr) > float(spec["max_step"]):
+            reasons.append(f"{key}: step too large")
+            continue
+        if isinstance(current.get(key), int):
+            accepted[key] = int(round(value))
+        else:
+            accepted[key] = round(value, 6)
+    return accepted, reasons, bool(accepted)
+
+
+def _extract_json_object(text: str) -> Dict[str, object] | None:
+    start = text.find('{')
+    end = text.rfind('}')
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        parsed = json.loads(text[start:end+1])
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
+def _call_anthropic_advisor(*, settings: Dict[str, object], system_prompt: str, user_prompt: str) -> Dict[str, object]:
+    direct_api_key = str(settings.get("advisory_api_key") or "").strip()
+    api_key = direct_api_key or os.getenv(str(settings.get("advisory_api_key_env", "ANTHROPIC_API_KEY")), "")
+    if not api_key:
+        return {"error": "no_api_key", "raw": None, "parsed": None}
+    body = {
+        "model": settings.get("advisory_model_name", "claude-3-5-sonnet-20241022"),
+        "max_tokens": 900,
+        "temperature": float(settings.get("advisory_temperature", 0.1)),
+        "system": system_prompt,
+        "messages": [{"role": "user", "content": user_prompt}],
+    }
+    req = request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        },
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=float(settings.get("advisory_timeout_seconds", 20))) as resp:
+            raw_text = resp.read().decode("utf-8")
+        data = json.loads(raw_text)
+        content = data.get("content", [])
+        text = "\n".join([str(x.get("text", "")) for x in content if isinstance(x, dict)])
+        parsed = _extract_json_object(text)
+        return {"error": None if parsed else "invalid_json", "raw": raw_text, "parsed": parsed}
+    except (error.HTTPError, error.URLError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
+        return {"error": f"request_failed: {exc}", "raw": None, "parsed": None}
+
+
+def _write_run_observability_csvs(result: Dict[str, object]) -> None:
+    run_dir = Path(str(result.get("run_dir", "")))
+    if not run_dir.exists():
+        return
+    obs_dir = run_dir / "observability"
+    def _load(name: str):
+        p = obs_dir / name
+        if not p.exists():
+            return {}
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+    agents = _load("agents_final.json").get("agents", [])
+    repro = _load("reproduction_events.json").get("events", [])
+    lineage = _load("lineage_summary.json").get("lineages", [])
+    dead = [r for r in result.get("timeline", [])]
+
+    survivors_path = run_dir / "survivors.csv"
+    with survivors_path.open("w", newline="", encoding="utf-8") as h:
+        w = csv.DictWriter(h, fieldnames=["agent_id", "lineage_id", "role", "energy", "reproduction_count", "lifetime_solves"])
+        w.writeheader()
+        for a in agents:
+            w.writerow({k: a.get(k) for k in w.fieldnames})
+
+    deaths_path = run_dir / "deaths.csv"
+    with deaths_path.open("w", newline="", encoding="utf-8") as h:
+        w = csv.DictWriter(h, fieldnames=["generation", "deaths"])
+        w.writeheader()
+        for step in dead:
+            w.writerow({"generation": step.get("generation"), "deaths": step.get("deaths", 0)})
+
+    repro_path = run_dir / "reproduction_log.csv"
+    with repro_path.open("w", newline="", encoding="utf-8") as h:
+        rows = ["generation", "parent_id", "parent_lineage_id", "child_id", "child_lineage_id"]
+        w = csv.DictWriter(h, fieldnames=rows)
+        w.writeheader()
+        for ev in repro:
+            w.writerow({k: ev.get(k) for k in rows})
+
+    help_path = run_dir / "help_log.csv"
+    with help_path.open("w", newline="", encoding="utf-8") as h:
+        w = csv.DictWriter(h, fieldnames=["generation", "problem_id", "helper_agent_id", "recipient_agent_id", "helper_lineage_id", "recipient_lineage_id"])
+        w.writeheader()
+        for p in result.get("problems", []):
+            for step in p.get("contribution_chain", []):
+                if step.get("type") != "collaboration":
+                    continue
+                w.writerow({
+                    "generation": p.get("generation"),
+                    "problem_id": p.get("problem_id"),
+                    "helper_agent_id": step.get("agent_id"),
+                    "recipient_agent_id": p.get("solved_by"),
+                    "helper_lineage_id": step.get("lineage_id"),
+                    "recipient_lineage_id": p.get("solver_lineage_id"),
+                })
+
+    lineage_path = run_dir / "lineage_summary.csv"
+    with lineage_path.open("w", newline="", encoding="utf-8") as h:
+        rows = ["lineage_id", "final_population", "births", "deaths", "total_descendants", "energy_share"]
+        w = csv.DictWriter(h, fieldnames=rows)
+        w.writeheader()
+        for row in lineage:
+            w.writerow({k: row.get(k) for k in rows})
 def _metric_from_timeline(timeline: List[Dict[str, object]], key: str, default: float = 0.0) -> float:
     if not timeline:
         return default
@@ -964,6 +1209,8 @@ def _run_find_stable_swarm(max_runs: int, advisory_settings: Dict[str, object] |
     advisory_settings = {**_advisory_defaults(), **(advisory_settings or {})}
     advisory_calls = 0
     advisory_accepted = 0
+    advisory_successes = 0
+    advisory_failures = 0
     operator_summaries: List[str] = []
     advisory_events: List[Dict[str, object]] = []
     advisor_enabled_ui = bool(advisory_settings.get("advisory_api_enabled"))
@@ -1000,6 +1247,7 @@ def _run_find_stable_swarm(max_runs: int, advisory_settings: Dict[str, object] |
     TUNING_STATE["advisor_failure_reason"] = None
     TUNING_STATE["advisory_calls_made"] = 0
     TUNING_STATE["advisory_events"] = []
+    TUNING_STATE["last_advisor_status"] = "idle"
     TUNING_STATE["human_readable_summary"] = None
     TUNING_STATE["human_readable_report_path"] = None
     TUNING_STATE["session_diagnostics"] = {
@@ -1031,6 +1279,33 @@ def _run_find_stable_swarm(max_runs: int, advisory_settings: Dict[str, object] |
             current["agents"] = 25
             current["api_access"] = advisor_enabled_ui
 
+            can_call_advisory = bool(advisory_settings.get("advisory_api_enabled")) and advisory_calls < int(advisory_settings.get("advisory_max_calls_per_session", 0))
+            if can_call_advisory and i == 1:
+                advisory_calls += 1
+                initial_prompt = _advisor_user_prompt_initial(current, run_records)
+                initial_call = _call_anthropic_advisor(settings=advisory_settings, system_prompt=_advisor_system_prompt(), user_prompt=initial_prompt)
+                parsed_initial = initial_call.get("parsed") if isinstance(initial_call, dict) else None
+                if isinstance(parsed_initial, dict):
+                    accepted_initial, rejected_initial, ok_initial = _validate_advisor_json(parsed_initial, current)
+                    if ok_initial:
+                        current.update(accepted_initial)
+                        advisor_active_runtime = True
+                        advisory_accepted += 1
+                        advisory_successes += 1
+                    if rejected_initial:
+                        advisor_failure_reason = f"invalid advisor fields rejected: {', '.join(rejected_initial[:4])}"
+                else:
+                    advisory_failures += 1
+                    advisor_failure_reason = _advisory_failure_reason(str(initial_call.get("error")))
+                advisory_events.append({
+                    "run": i,
+                    "phase": "initial",
+                    "call_made": True,
+                    "recommendations_accepted": bool(isinstance(parsed_initial, dict) and parsed_initial.get("recommended_config")),
+                    "recommendations_rejected": bool(advisor_failure_reason),
+                    "failure_reason": advisor_failure_reason,
+                })
+
             signature = canonical_config_signature(current)
             if seen_signatures.get(signature, 0) >= 1:
                 TUNING_STATE["session_diagnostics"]["repeated_configs"].append({"run": i, "signature": str(signature)})
@@ -1045,6 +1320,7 @@ def _run_find_stable_swarm(max_runs: int, advisory_settings: Dict[str, object] |
 
             cfg = config_from_request({"preset": "ecosystem_optimal_v1.json", "api_access": advisor_enabled_ui, **current})
             result = SimulationEngine(cfg).run()
+            _write_run_observability_csvs(result)
             metrics = score_and_label_run(result)
             timeline = list(result.get("timeline", []))
             peak = max(timeline, key=lambda item: int(item.get("population", 0))) if timeline else {}
@@ -1127,55 +1403,51 @@ def _run_find_stable_swarm(max_runs: int, advisory_settings: Dict[str, object] |
 
             can_call_advisory = bool(advisory_settings.get("advisory_api_enabled")) and advisory_calls < int(advisory_settings.get("advisory_max_calls_per_session", 0))
             if can_call_advisory:
-                advisory_payload = _build_advisory_payload(
-                    session_id=session_id,
-                    run_number=i,
-                    elapsed_seconds=elapsed,
-                    current=current,
-                    result=result,
-                    metrics=metrics,
-                    run_records=run_records,
-                )
                 advisory_calls += 1
-                advisory_result = _call_advisory_api(advisory_payload, advisory_settings)
-                parsed = advisory_result.get("parsed") if isinstance(advisory_result, dict) else _default_advisory_response()
-                merged, merge_explanation = _merge_advisory_with_deterministic(current, deterministic_updated, parsed if isinstance(parsed, dict) else _default_advisory_response())
-                merged["agents"] = 25
-                merged["api_access"] = advisor_enabled_ui
-                request_error = advisory_result.get("error") if isinstance(advisory_result, dict) else "request_failed: invalid response"
-                failure_reason = _advisory_failure_reason(request_error)
-                if request_error:
-                    advisor_failure_reason = f"{failure_reason}; fallback to deterministic mode"
+                next_prompt = _advisor_user_prompt_next(current, metrics, run_records)
+                advisory_result = _call_anthropic_advisor(settings=advisory_settings, system_prompt=_advisor_system_prompt(), user_prompt=next_prompt)
+                parsed = advisory_result.get("parsed") if isinstance(advisory_result, dict) else None
+                accepted_config: Dict[str, object] = {}
+                rejected: List[str] = []
+                if isinstance(parsed, dict):
+                    accepted_config, rejected, accepted_ok = _validate_advisor_json(parsed, current)
+                    if accepted_ok:
+                        updated.update(accepted_config)
+                        updated["agents"] = 25
+                        updated["api_access"] = advisor_enabled_ui
+                        advisor_active_runtime = True
+                        advisory_accepted += 1
+                        advisory_successes += 1
+                    if rejected:
+                        advisor_failure_reason = f"advisor suggestion partially rejected: {', '.join(rejected[:4])}"
                 else:
-                    advisor_active_runtime = True
+                    advisory_failures += 1
+                    advisor_failure_reason = _advisory_failure_reason(str(advisory_result.get("error")))
                 event = {
                     "run": i,
+                    "phase": "next",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "call_made": True,
-                    "request_summary": _advisory_payload_summary(advisory_payload),
-                    "response_summary": _advisory_response_summary(parsed if isinstance(parsed, dict) else None),
-                    "recommendations_accepted": merge_explanation.startswith("merged_deterministic_api"),
-                    "recommendations_rejected": not merge_explanation.startswith("merged_deterministic_api"),
-                    "failure_reason": failure_reason,
-                    "merge_explanation": merge_explanation,
+                    "recommendations_accepted": bool(accepted_config),
+                    "recommendations_rejected": bool(rejected),
+                    "failure_reason": advisor_failure_reason,
+                    "rejected_reasons": rejected,
                 }
                 advisory_events.append(event)
                 advice_record = {
-                    "advisory_input": advisory_payload,
+                    "advisory_input": next_prompt,
                     "raw_advisory_response": advisory_result.get("raw") if isinstance(advisory_result, dict) else None,
                     "parsed_advisory_response": parsed,
-                    "advice_accepted": merge_explanation.startswith("merged_deterministic_api"),
-                    "applied_config_source": "api_assisted_tuner" if merge_explanation.startswith("merged_deterministic_api") else "deterministic_tuner",
-                    "merge_explanation": merge_explanation if not request_error else f"{merge_explanation}; api_error={request_error}",
-                    "failure_reason": failure_reason,
+                    "advice_accepted": bool(accepted_config),
+                    "applied_config_source": "api_assisted_tuner" if accepted_config else "deterministic_tuner",
+                    "merge_explanation": "anthropic bounded recommendation" if accepted_config else "advisor rejected; deterministic fallback",
+                    "failure_reason": advisor_failure_reason,
+                    "rejected_reasons": rejected,
                 }
-                if advice_record["advice_accepted"]:
-                    advisory_accepted += 1
-                if isinstance(parsed, dict) and parsed.get("operator_summary"):
-                    operator_summaries.append(str(parsed.get("operator_summary")))
-                updated = merged
+                if isinstance(parsed, dict) and parsed.get("rationale"):
+                    operator_summaries.append(str(parsed.get("rationale")))
             elif advisor_enabled_ui:
-                advisor_failure_reason = "fallback to deterministic mode"
+                advisor_failure_reason = "advisor disabled at runtime (max advisory calls reached)"
 
             params = updated
             changed_parameters = {
@@ -1188,12 +1460,13 @@ def _run_find_stable_swarm(max_runs: int, advisory_settings: Dict[str, object] |
             run_records[-1]["final_applied_config"] = updated
             TUNING_STATE["latest_adjustment_reason"] = reason
             run_records[-1]["adjustment_reason"] = reason
-            TUNING_STATE["advisory_usage"] = {"calls": advisory_calls, "accepted": advisory_accepted, "operator_summaries": operator_summaries[-5:]}
+            TUNING_STATE["advisory_usage"] = {"calls": advisory_calls, "accepted": advisory_accepted, "succeeded": advisory_successes, "failed": advisory_failures, "operator_summaries": operator_summaries[-5:]}
             TUNING_STATE["advisor_enabled_ui"] = advisor_enabled_ui
             TUNING_STATE["advisor_active_runtime"] = advisor_active_runtime
             TUNING_STATE["advisor_failure_reason"] = advisor_failure_reason
             TUNING_STATE["advisory_calls_made"] = advisory_calls
             TUNING_STATE["advisory_events"] = advisory_events[-20:]
+            TUNING_STATE["last_advisor_status"] = "success" if advisor_active_runtime else ("failure" if advisor_failure_reason else "inactive")
 
             diagnoses = set(metrics.get("diagnosis", []))
             if improved:
@@ -1256,7 +1529,7 @@ def _run_find_stable_swarm(max_runs: int, advisory_settings: Dict[str, object] |
             early_stop_reason=TUNING_STATE.get("early_stop_reason"),
             session_diagnostics=TUNING_STATE.get("session_diagnostics"),
             advisory_settings=advisory_settings,
-            advisory_usage={"calls": advisory_calls, "accepted": advisory_accepted, "operator_summaries": operator_summaries[-5:]},
+            advisory_usage={"calls": advisory_calls, "accepted": advisory_accepted, "succeeded": advisory_successes, "failed": advisory_failures, "operator_summaries": operator_summaries[-5:]},
             advisor_enabled_ui=advisor_enabled_ui,
             advisor_active_runtime=advisor_active_runtime,
             advisor_failure_reason=advisor_failure_reason,

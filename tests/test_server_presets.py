@@ -8,6 +8,8 @@ def test_discover_presets_lists_experiment_configs():
     assert "experiment_default.json" in preset_ids
     assert "experiment_stress.json" in preset_ids
     assert "ecosystem_optimal_v1.json" in preset_ids
+    assert "stabilization_balanced.json" in preset_ids
+    assert "stabilization_strong.json" in preset_ids
 
 
 def test_config_from_request_uses_preset_values():

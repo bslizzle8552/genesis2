@@ -10,7 +10,7 @@ def test_simulation_runs_and_logs(tmp_path):
     assert result["final_population"] >= 0
     assert len(result["timeline"]) >= 1
     run_dir = Path(result["summary_path"]).parent
-    assert run_dir.name.startswith("default__")
+    assert run_dir.name.startswith("run_")
     assert (run_dir / "summary.json").exists()
 
 
@@ -70,7 +70,16 @@ def test_jsonl_metric_streams_are_emitted(tmp_path):
     cfg = SimulationConfig(seed=9, agents=6, generations=4, tasks_per_generation=3, log_dir=str(tmp_path))
     result = SimulationEngine(cfg).run()
     run_dir = Path(result["summary_path"]).parent
-    for name in ["generation_metrics.jsonl", "lineage_metrics.jsonl", "role_metrics.jsonl", "problem_metrics.jsonl"]:
+    for name in [
+        "generation_metrics.jsonl",
+        "energy_metrics.jsonl",
+        "dominance_metrics.jsonl",
+        "reproduction_metrics.jsonl",
+        "reward_capture_metrics.jsonl",
+        "lineage_metrics.jsonl",
+        "role_metrics.jsonl",
+        "problem_metrics.jsonl",
+    ]:
         assert (run_dir / name).exists()
 
 
@@ -92,6 +101,10 @@ def test_repeated_runs_use_unique_folders_and_manifest(tmp_path):
         "artifact_metrics.jsonl",
         "config.json",
         "generation_metrics.jsonl",
+        "energy_metrics.jsonl",
+        "dominance_metrics.jsonl",
+        "reproduction_metrics.jsonl",
+        "reward_capture_metrics.jsonl",
         "lineage_metrics.jsonl",
         "problem_metrics.jsonl",
         "role_metrics.jsonl",
@@ -118,7 +131,21 @@ def test_run_label_is_sanitized_in_folder_name(tmp_path):
     result = SimulationEngine(cfg).run()
     run_dir = Path(result["summary_path"]).parent
 
-    assert run_dir.name.startswith("My-Run-Label__")
+    assert run_dir.name.startswith("run_")
+    assert "_custom_12_" in run_dir.name
+
+
+def test_run_manifest_contains_config_identity_metadata(tmp_path):
+    cfg = SimulationConfig(seed=22, agents=6, generations=3, tasks_per_generation=3, log_dir=str(tmp_path), preset_name="stabilization_strong")
+    result = SimulationEngine(cfg).run()
+    run_dir = Path(result["summary_path"]).parent
+    manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
+
+    assert "config_hash" in manifest
+    assert manifest["config_hash"] == result["config_hash"]
+    assert manifest["preset_name"] == "stabilization_strong"
+    assert manifest["run_instance_id"] == result["run_instance_id"]
+    assert (run_dir / "config.json").exists()
 
 
 def test_generation_metrics_include_dominance_fields(tmp_path):
@@ -134,14 +161,21 @@ def test_generation_metrics_include_dominance_fields(tmp_path):
         "top_lineage_energy_share",
         "top_3_lineage_energy_share",
         "energy_inequality_proxy",
+        "energy_p99_median_ratio",
+        "energy_mean_median_ratio",
         "births_from_top_lineage",
         "births_from_top_3_lineages",
         "reproduction_concentration",
         "lineage_extinction_count",
+        "lineage_survival_count",
         "surviving_lineage_count",
         "reward_concentration_by_lineage",
+        "reward_share_top_10pct_agents",
+        "dominance_pressure_index",
+        "system_flags",
         "births_blocked_by_cooldown",
         "reward_multiplier_stats",
+        "energy_flow",
     ]:
         assert field in row
 

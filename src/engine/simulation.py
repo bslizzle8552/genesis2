@@ -12,6 +12,7 @@ from src.agents.agent import Agent
 from src.agents.genome import Genome
 from src.agents.reproduction import reproduce
 from src.analytics.logger import SimulationLogger, summarize_energy
+from src.analytics.metrics import detect_phase, gini, lineage_energy, percentile, role_energy, top_share
 from src.world.board import WorldBoard
 from src.world.economy import COSTS, REWARDS
 from src.world.problems import DOMAINS, Problem, spawn_problems
@@ -37,6 +38,10 @@ class SimulationConfig:
     immigrant_injection_count: int = 2
     tier_mix: Dict[str, float] | None = None
     api_access: bool = False
+    run_label: str = "default"
+    experiment_id: str = "adhoc"
+    reward_policy_id: str = "baseline"
+    diagnostics_window: int = 12
 
 
 class SimulationEngine:
@@ -50,6 +55,8 @@ class SimulationEngine:
         self.agent_contribution_history: Dict[str, List[float]] = {}
         self.reproduced_roles: set[str] = set()
         self.role_reproduction_counts: Counter[str] = Counter()
+        self.agent_lifecycle: Dict[str, Dict[str, float | int | None]] = {}
+        self.artifact_registry: Dict[str, Dict[str, object]] = {}
 
         for _ in range(config.agents):
             agent_id = self._claim_agent_id()
@@ -100,6 +107,18 @@ class SimulationEngine:
             },
         )
         self.agent_contribution_history.setdefault(agent_id, [])
+        self.agent_lifecycle.setdefault(
+            agent_id,
+            {
+                "lifetime_births": 0,
+                "first_reproduction_generation": None,
+                "last_reproduction_generation": None,
+                "lifetime_energy_earned": 0.0,
+                "lifetime_energy_spent": 0.0,
+                "lifetime_contribution_score": 0.0,
+                "lifespan_generations": 0,
+            },
+        )
 
     def _agent_lookup(self) -> Dict[str, Agent]:
         return {agent.agent_id: agent for agent in self.agents}
@@ -166,6 +185,16 @@ class SimulationEngine:
 
     def _add_reward(self, agent_id: str, reward: float) -> None:
         self.agent_contributions[agent_id]["reward_earned"] += round(reward, 3)
+        self.agent_lifecycle.setdefault(agent_id, {}).setdefault("lifetime_energy_earned", 0.0)
+        self.agent_lifecycle[agent_id]["lifetime_energy_earned"] = round(
+            float(self.agent_lifecycle[agent_id].get("lifetime_energy_earned", 0.0)) + float(reward), 4
+        )
+
+    def _spend_energy(self, agent_id: str, amount: float) -> None:
+        self.agent_lifecycle.setdefault(agent_id, {}).setdefault("lifetime_energy_spent", 0.0)
+        self.agent_lifecycle[agent_id]["lifetime_energy_spent"] = round(
+            float(self.agent_lifecycle[agent_id].get("lifetime_energy_spent", 0.0)) + float(amount), 4
+        )
 
     def _recent_contribution_score(self, agent_id: str, lookback: int = 5) -> float:
         history = self.agent_contribution_history.get(agent_id, [])
@@ -952,7 +981,7 @@ class SimulationEngine:
 
     def run(self, progress_callback=None) -> Dict:
         run_root = Path(self.config.log_dir)
-        run_name = f"run_seed{self.config.seed}_g{self.config.generations}"
+        run_name = f"run_seed{self.config.seed}_g{self.config.generations}_{self.config.run_label}"
         logger = SimulationLogger(run_root / run_name)
         snapshots: List[Dict] = []
         board_events: List[Dict] = []
@@ -976,11 +1005,16 @@ class SimulationEngine:
         }
 
         tier_mix = self.config.tier_mix if self.config.tier_mix else {"1": 0.35, "2": 0.30, "3": 0.20, "4": 0.15}
+        cumulative_unique_reproducers: set[str] = set()
+        cumulative_repeat_reproducers: set[str] = set()
+        phase_first_generation: Dict[str, int] = {}
+        detected_phases: List[Dict[str, object]] = []
 
         for generation in range(1, self.config.generations + 1):
             births = deaths = artifact_reuse = artifact_created = solved = verified = subtasks = 0
             critiques = decompositions = integrations = 0
             generation_points = defaultdict(float)
+            births_by_agent: Counter[str] = Counter()
             generation_contribution_points = {
                 a.agent_id: self.agent_contributions.get(a.agent_id, {}).get("meaningful_points", 0.0)
                 for a in self.agents
@@ -1057,6 +1091,7 @@ class SimulationEngine:
                             generation_points[subtask_agent.agent_id] += REWARDS["useful_subtask"]
                             totals["reward_subtasks"] += REWARDS["useful_subtask"]
 
+                critic = None
                 if best.tier >= 3:
                     critic = self._pick_support_agent("critic", exclude)
                     if critic:
@@ -1179,14 +1214,38 @@ class SimulationEngine:
                     artifact_reuse += 1
                     totals["artifact_reuse"] += 1
                     self.agent_contributions[agent.agent_id]["artifacts_reused"] += 1
+                    reused_artifact_id = agent.artifact_store[0]
+                    if reused_artifact_id in self.artifact_registry:
+                        meta = self.artifact_registry[reused_artifact_id]
+                        meta["times_reused"] = int(meta.get("times_reused", 0)) + 1
+                        meta.setdefault("reuse_generations", []).append(generation)
+                        meta.setdefault("reuser_agent_ids", []).append(agent.agent_id)
+                        meta.setdefault("reuser_lineage_ids", []).append(agent.lineage_id)
+                        meta["reused_in_successful_solve"] = bool(meta.get("reused_in_successful_solve")) or bool(best.solved)
+                        meta["reused_in_collaborative_solve"] = bool(meta.get("reused_in_collaborative_solve")) or bool(best.resolution_mode == "collaborative")
                     best.contribution_chain.append({"generation": str(generation), "agent_id": agent.agent_id, "type": "artifact_reuse", "detail": f"{agent.agent_id} reused artifact on this problem"})
 
                 if chain.get("integrator_id"):
                     integ = next((a for a in self.agents if a.agent_id == chain["integrator_id"]), None)
-                    if integ and integ.maybe_create_artifact(problem.domain):
+                    created_artifact = integ.maybe_create_artifact(problem.domain) if integ else None
+                    if created_artifact:
                         artifact_created += 1
                         totals["artifact_created"] += 1
                         self.agent_contributions[integ.agent_id]["artifacts_created"] += 1
+                        self.artifact_registry[created_artifact] = {
+                            "artifact_id": created_artifact,
+                            "creation_generation": generation,
+                            "creator_agent_id": integ.agent_id,
+                            "creator_lineage_id": integ.lineage_id,
+                            "creator_role": integ.choose_role(),
+                            "artifact_type": problem.domain,
+                            "times_reused": 0,
+                            "reuse_generations": [],
+                            "reuser_agent_ids": [],
+                            "reuser_lineage_ids": [],
+                            "reused_in_successful_solve": False,
+                            "reused_in_collaborative_solve": False,
+                        }
 
             offspring: List[Agent] = []
             for agent in self.agents:
@@ -1202,10 +1261,16 @@ class SimulationEngine:
                     self._next_agent_id += 1
                     self._register_agent(child.agent_id)
                     self.agent_contributions[agent.agent_id]["offspring"] += 1
+                    life = self.agent_lifecycle.setdefault(agent.agent_id, {})
+                    life["lifetime_births"] = int(life.get("lifetime_births", 0)) + 1
+                    if life.get("first_reproduction_generation") is None:
+                        life["first_reproduction_generation"] = generation
+                    life["last_reproduction_generation"] = generation
                     role = agent.choose_role()
                     self.reproduced_roles.add(role)
                     self.role_reproduction_counts[role] += 1
                     births += 1
+                    births_by_agent[agent.agent_id] += 1
                     board_events.append(
                         {
                             "generation": generation,
@@ -1248,6 +1313,129 @@ class SimulationEngine:
             roles = Counter(a.choose_role() for a in self.agents)
             role_distribution = {role: round(roles.get(role, 0) / max(1, len(self.agents)), 3) for role in ROLE_BUCKETS}
 
+            current_agents = [a.snapshot() for a in self.agents]
+            energies = [float(a.get("energy", 0.0)) for a in current_agents]
+            energies_sorted = sorted(energies)
+            lineage_totals = lineage_energy(current_agents)
+            role_totals = role_energy(current_agents)
+            total_energy = sum(energies_sorted)
+            top_agents = sorted(current_agents, key=lambda a: float(a.get("energy", 0.0)), reverse=True)[:10]
+
+            births_total_generation = sum(births_by_agent.values())
+            unique_reproducers_generation = len(births_by_agent)
+            repeat_reproducers_generation = sum(1 for c in births_by_agent.values() if c > 1)
+            cumulative_unique_reproducers.update(births_by_agent.keys())
+            cumulative_repeat_reproducers.update(aid for aid, count in births_by_agent.items() if count > 1)
+
+            births_by_role = Counter()
+            births_by_lineage = Counter()
+            for aid, count in births_by_agent.items():
+                parent = next((agent for agent in self.agents if agent.agent_id == aid), None)
+                if parent:
+                    births_by_role[parent.choose_role()] += count
+                    births_by_lineage[parent.lineage_id] += count
+
+            births_shares = sorted(births_by_agent.values(), reverse=True)
+            share_top1 = round((births_shares[0] / births_total_generation), 6) if births_shares and births_total_generation else 0.0
+            share_top5 = round((sum(births_shares[:5]) / births_total_generation), 6) if births_shares and births_total_generation else 0.0
+            share_top10 = round((sum(births_shares[:10]) / births_total_generation), 6) if births_shares and births_total_generation else 0.0
+
+            logger.log_stream("generation_metrics", {
+                "schema_version": "1.0",
+                "generation": generation,
+                "population": len(self.agents),
+                "total_energy": round(total_energy, 4),
+                "energy_min": round(min(energies_sorted), 4) if energies_sorted else 0.0,
+                "energy_median": round(percentile(energies_sorted, 0.5), 4),
+                "energy_mean": round(sum(energies_sorted) / max(1, len(energies_sorted)), 4),
+                "energy_p90": round(percentile(energies_sorted, 0.9), 4),
+                "energy_p95": round(percentile(energies_sorted, 0.95), 4),
+                "energy_p99": round(percentile(energies_sorted, 0.99), 4),
+                "energy_max": round(max(energies_sorted), 4) if energies_sorted else 0.0,
+                "top_1pct_energy_share": top_share(energies_sorted, 0.01),
+                "top_10pct_energy_share": top_share(energies_sorted, 0.10),
+                "energy_gini": gini(energies_sorted),
+                "top_agents": [{"agent_id": a["agent_id"], "lineage_id": a["lineage_id"], "role": a["role"], "energy": a["energy"]} for a in top_agents],
+                "births": births,
+                "deaths": deaths,
+                "unique_reproducers_generation": unique_reproducers_generation,
+                "repeat_reproducers_generation": repeat_reproducers_generation,
+                "cumulative_unique_reproducers": len(cumulative_unique_reproducers),
+                "cumulative_repeat_reproducers": len(cumulative_repeat_reproducers),
+                "birth_share_top_1": share_top1,
+                "birth_share_top_5": share_top5,
+                "birth_share_top_10": share_top10,
+                "avg_births_per_reproducer": round(births_total_generation / max(1, unique_reproducers_generation), 6),
+                "artifact_created": artifact_created,
+                "artifact_reused": artifact_reuse,
+                "collaboration_share_generation": round(sum(1 for p in board.problems if p.resolution_mode == "collaborative" and p.solved) / max(1, sum(1 for p in board.problems if p.solved)), 6),
+                "lineage_energy": lineage_totals,
+                "role_energy": role_totals,
+            })
+
+            for lineage_id, total in lineage_totals.items():
+                logger.log_stream("lineage_metrics", {
+                    "schema_version": "1.0",
+                    "generation": generation,
+                    "lineage_id": lineage_id,
+                    "total_energy": round(total, 4),
+                    "energy_share": round(total / max(1e-9, total_energy), 6),
+                    "births": births_by_lineage.get(lineage_id, 0),
+                    "lineage_size": int(lineages.get(lineage_id, 0)),
+                })
+
+            for role_name, role_bucket in role_totals.items():
+                logger.log_stream("role_metrics", {
+                    "schema_version": "1.0",
+                    "generation": generation,
+                    "role": role_name,
+                    "total_energy": role_bucket["total_energy"],
+                    "median_energy": role_bucket["median_energy"],
+                    "mean_energy": role_bucket["mean_energy"],
+                    "births": births_by_role.get(role_name, 0),
+                })
+
+            for problem in board.problems:
+                participants = list(dict.fromkeys(problem.agents_involved))
+                logger.log_stream("problem_metrics", {
+                    "schema_version": "1.0",
+                    "problem_id": problem.problem_id,
+                    "generation": problem.generation,
+                    "tier": problem.tier,
+                    "domain": problem.domain,
+                    "solved": problem.solved,
+                    "collaboration_mode": problem.resolution_mode,
+                    "participant_count": len(participants),
+                    "participating_agent_ids": participants,
+                    "participating_lineage_ids": sorted({next((a.lineage_id for a in self.agents if a.agent_id == aid), aid) for aid in participants}),
+                    "artifact_assisted": any(step.get("type") == "artifact_reuse" for step in problem.contribution_chain),
+                    "solve_duration": None if not problem.solved_generation else problem.solved_generation - problem.generation,
+                    "final_reward_amount": round(sum(problem.reward_split.values()), 4),
+                    "reward_split": problem.reward_split,
+                    "participant_roles": {aid: next((a.choose_role() for a in self.agents if a.agent_id == aid), "unknown") for aid in participants},
+                    "contribution_chain_sequence": [step.get("type") for step in problem.contribution_chain],
+                })
+
+            window = snapshots[-self.config.diagnostics_window + 1 :] + [{
+                "population": len(self.agents),
+                "births": births,
+                "deaths": deaths,
+                "diversity_score": self._diversity_score(),
+                "collaboration_share": round(sum(1 for p in board.problems if p.resolution_mode == "collaborative" and p.solved) / max(1, sum(1 for p in board.problems if p.solved)), 6),
+                "median_energy": round(percentile(energies_sorted, 0.5), 4),
+            }]
+            phase = detect_phase(
+                [w.get("population", 0) for w in window],
+                [w.get("births", 0) for w in window],
+                [w.get("deaths", 0) for w in window],
+                [w.get("median_energy", 0.0) for w in window],
+                [w.get("diversity_score", 0.0) for w in window],
+                [w.get("collaboration_share", 0.0) for w in window],
+            )
+            detected_phases.append({"generation": generation, **phase})
+            if phase["phase"] not in phase_first_generation:
+                phase_first_generation[phase["phase"]] = generation
+
             for aid, starting_total in generation_contribution_points.items():
                 prev = self.agent_contribution_history.setdefault(aid, [])
                 delta = self.agent_contributions[aid]["meaningful_points"] - starting_total
@@ -1261,7 +1449,8 @@ class SimulationEngine:
                 "population": len(self.agents),
                 "births": births,
                 "deaths": deaths,
-                "energy_distribution": summarize_energy(energies),
+                "energy_distribution": {**summarize_energy(energies), "median": round(percentile(energies, 0.5), 4), "p90": round(percentile(energies, 0.9), 4), "p99": round(percentile(energies, 0.99), 4)},
+                "collaboration_share": round(sum(1 for p in board.problems if p.resolution_mode == "collaborative" and p.solved) / max(1, sum(1 for p in board.problems if p.solved)), 6),
                 "problem_outcomes": {
                     "solved": solved,
                     "verified": verified,
@@ -1301,6 +1490,9 @@ class SimulationEngine:
             if not self.agents:
                 break
 
+        for artifact in self.artifact_registry.values():
+            logger.log_stream("artifact_metrics", {"schema_version": "1.0", **artifact})
+
         summary_path = logger.finalize()
         lineage_members = self._collect_lineages()
 
@@ -1309,6 +1501,10 @@ class SimulationEngine:
             agent_id = agent["agent_id"]
             agent["energy_history"] = self.agent_energy_history.get(agent_id, [])
             agent["contributions"] = self.agent_contributions.get(agent_id, {})
+            life = dict(self.agent_lifecycle.get(agent_id, {}))
+            life["lifetime_contribution_score"] = round(float(agent["contributions"].get("meaningful_score", 0.0)), 4)
+            life["lifespan_generations"] = self.config.generations - int(agent.get("generation_born", 0))
+            agent["lifecycle"] = life
             agent["offspring"] = [a["agent_id"] for a in agents_snapshot if a.get("parent_id") == agent_id]
             agent["workflow"] = agent["genome"].get("workflows", {})
 
@@ -1331,6 +1527,12 @@ class SimulationEngine:
             "report": report,
             "lineages": lineage_members,
             "config": asdict(self.config),
+            "phase_diagnostics": {
+                "by_generation": detected_phases,
+                "first_generation": phase_first_generation,
+                "peak_population_generation": max(snapshots, key=lambda s: s.get("population", 0)).get("generation", 0) if snapshots else 0,
+                "stabilization_start_generation": phase_first_generation.get("stabilization"),
+            },
             "problems": [
                 {
                     "problem_id": p.problem_id,

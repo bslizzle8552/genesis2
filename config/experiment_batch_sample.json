@@ -1,0 +1,18 @@
+{
+  "experiment_id": "throughput_sweep",
+  "output_root": "runs/experiments",
+  "base": {
+    "agents": 100,
+    "generations": 60,
+    "initial_energy": 100,
+    "reproduction_threshold": 130,
+    "mutation_rate": 0.15,
+    "upkeep_cost": 6,
+    "log_dir": "runs/experiments"
+  },
+  "sweep": {
+    "seed": [11, 12],
+    "tasks_per_generation": [8, 15, 25, 50],
+    "reward_policy_id": ["baseline"]
+  }
+}

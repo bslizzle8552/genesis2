@@ -15,7 +15,15 @@ from src.agents.agent import Agent
 from src.agents.genome import Genome
 from src.agents.reproduction import reproduce
 from src.analytics.logger import SimulationLogger, summarize_energy
-from src.analytics.metrics import detect_phase, gini, lineage_energy, percentile, role_energy, top_share
+from src.analytics.metrics import (
+    detect_phase,
+    dominance_pressure_index,
+    energy_distribution_metrics,
+    lineage_energy,
+    percentile,
+    role_energy,
+    top_share,
+)
 from src.world.board import WorldBoard
 from src.world.economy import COSTS, REWARDS
 from src.world.problems import DOMAINS, Problem, spawn_problems
@@ -59,6 +67,10 @@ class SimulationConfig:
     reproduction_cooldown_generations: int = 2
     reproduction_cost: float = 32.0
     child_energy_fraction: float = 0.5
+    inequality_extreme_threshold: float = 12.0
+    ecosystem_mean_median_lower: float = 0.8
+    ecosystem_mean_median_upper: float = 2.5
+    ecosystem_target_min_lineages: int = 4
 
 
 class SimulationEngine:
@@ -223,6 +235,18 @@ class SimulationEngine:
             lineage_energy_totals[agent.lineage_id] += float(agent.energy)
             total_energy += float(agent.energy)
         return lineage_population, dict(lineage_energy_totals), total_energy
+
+    def _derive_system_flags(self, lineage_count: int, top_lineage_share: float, mean_median_ratio: float, p99_median_ratio: float) -> Dict[str, bool]:
+        ecosystem_min = max(1, int(self.config.ecosystem_target_min_lineages or self.config.diversity_min_lineages))
+        return {
+            "dominance_emerging": bool(top_lineage_share > 0.4),
+            "inequality_extreme": bool(p99_median_ratio > self.config.inequality_extreme_threshold),
+            "ecosystem_stable": bool(
+                lineage_count >= ecosystem_min
+                and top_lineage_share < 0.35
+                and self.config.ecosystem_mean_median_lower <= mean_median_ratio <= self.config.ecosystem_mean_median_upper
+            ),
+        }
 
     def _reward_multiplier(
         self,
@@ -1047,6 +1071,10 @@ class SimulationEngine:
                 ],
                 "exported_not_used_by_dashboard": [
                     "generation_metrics.jsonl",
+                    "energy_metrics.jsonl",
+                    "dominance_metrics.jsonl",
+                    "reproduction_metrics.jsonl",
+                    "reward_capture_metrics.jsonl",
                     "lineage_metrics.jsonl",
                     "role_metrics.jsonl",
                     "problem_metrics.jsonl",
@@ -1270,6 +1298,10 @@ class SimulationEngine:
     def _generate_markdown_summary(self, result: Dict, report: Dict) -> str:
         ceiling = report.get("no_api_capability_ceiling", {})
         obs = report.get("observability", {})
+        latest = result.get("timeline", [])[-1] if result.get("timeline") else {}
+        latest_dom = latest.get("dominance_metrics", {})
+        latest_energy = latest.get("energy_distribution", {})
+        latest_flags = latest.get("system_flags", {})
         lines = [
             "# Genesis2 Run Summary",
             "",
@@ -1297,6 +1329,14 @@ class SimulationEngine:
             f"- Reproducers unique/repeat: {obs.get('reproduction', {}).get('unique_reproducers', 0)} / {obs.get('reproduction', {}).get('repeat_reproducers', 0)}",
             f"- Solo vs collaborative success: {obs.get('collaboration', {}).get('success_rate_solo', 0):.2%} vs {obs.get('collaboration', {}).get('success_rate_collaborative', 0):.2%}",
             f"- Plateau dimensions: {', '.join(obs.get('plateau', {}).get('plateau_dimensions', [])) or 'None'}",
+            "",
+            "## Dominance & Energy Concentration",
+            f"- Top lineage energy share: {latest_dom.get('top_lineage_energy_share', 0):.2%}",
+            f"- Top-3 lineage energy share: {latest_dom.get('top_3_lineage_energy_share', 0):.2%}",
+            f"- Dominance Pressure Index (DPI): {latest_dom.get('dominance_pressure_index', 0):.3f}",
+            f"- Energy inequality (p99/median): {latest_energy.get('p99_median_ratio', 0):.3f}",
+            f"- Energy skew (mean/median): {latest_energy.get('mean_median_ratio', 0):.3f}",
+            f"- System flags: dominance={latest_flags.get('dominance_emerging', False)}, inequality_extreme={latest_flags.get('inequality_extreme', False)}, ecosystem_stable={latest_flags.get('ecosystem_stable', False)}",
             "",
             "## Sample Problem Prompts",
         ]
@@ -1382,6 +1422,13 @@ class SimulationEngine:
             critiques = decompositions = integrations = 0
             generation_points = defaultdict(float)
             births_by_agent: Counter[str] = Counter()
+            reward_by_agent_generation: Counter[str] = Counter()
+            reward_by_lineage_generation: Counter[str] = Counter()
+            reward_by_problem: Dict[str, Dict[str, object]] = {}
+            generation_energy_produced = 0.0
+            generation_energy_consumed = 0.0
+            generation_energy_start = sum(float(agent.energy) for agent in self.agents)
+            lineages_start_generation = {a.lineage_id for a in self.agents}
             generation_contribution_points = {
                 a.agent_id: self.agent_contributions.get(a.agent_id, {}).get("meaningful_points", 0.0)
                 for a in self.agents
@@ -1410,6 +1457,7 @@ class SimulationEngine:
             if current_lineages >= self.config.diversity_min_lineages and self.config.diversity_bonus > 0:
                 for agent in self.agents:
                     agent.energy += self.config.diversity_bonus
+                    generation_energy_produced += float(self.config.diversity_bonus)
 
             for agent in sorted(self.agents, key=lambda a: a.energy, reverse=True):
                 open_tasks = board.open_problems()
@@ -1438,6 +1486,30 @@ class SimulationEngine:
                         "attribution": chain,
                     }
                 )
+
+                if chain.get("payouts"):
+                    problem_rewards = reward_by_problem.setdefault(
+                        best.problem_id,
+                        {
+                            "generation": generation,
+                            "problem_id": best.problem_id,
+                            "tier": best.tier,
+                            "domain": best.domain,
+                            "total_reward": 0.0,
+                            "reward_distribution": {},
+                            "lineage_distribution": {},
+                        },
+                    )
+                    live_lookup = {a.agent_id: a for a in self.agents}
+                    for aid, amount in chain["payouts"].items():
+                        reward_by_agent_generation[aid] += float(amount)
+                        parent = live_lookup.get(aid)
+                        if parent:
+                            reward_by_lineage_generation[parent.lineage_id] += float(amount)
+                        problem_rewards["reward_distribution"][aid] = round(problem_rewards["reward_distribution"].get(aid, 0.0) + float(amount), 4)
+                        lineage_id = parent.lineage_id if parent else aid
+                        problem_rewards["lineage_distribution"][str(lineage_id)] = round(problem_rewards["lineage_distribution"].get(str(lineage_id), 0.0) + float(amount), 4)
+                        problem_rewards["total_reward"] = round(float(problem_rewards["total_reward"]) + float(amount), 4)
 
                 agent.energy -= COSTS["solve_attempt"]
                 contributors = []
@@ -1494,6 +1566,7 @@ class SimulationEngine:
                     tier_solved[str(best.tier)] += 1
                     domain_solved[best.domain] += 1
                     agent.energy += REWARDS["correct_solution"]
+                    generation_energy_produced += float(REWARDS["correct_solution"])
                     self.agent_contributions[agent.agent_id]["solves"] += 1
                     best.contribution_chain.append({"generation": str(generation), "agent_id": agent.agent_id, "type": "solve", "detail": f"{agent.agent_id} provided accepted solve"})
                     best.reward_split[agent.agent_id] = round(REWARDS["correct_solution"], 2)
@@ -1518,6 +1591,7 @@ class SimulationEngine:
                             }
                         )
                         helper.energy += helper_share
+                        generation_energy_produced += float(helper_share)
 
                     board_events.append(
                         {
@@ -1543,6 +1617,7 @@ class SimulationEngine:
                             verified += 1
                             totals["verified"] += 1
                             verifier.energy += REWARDS["successful_verification"]
+                            generation_energy_produced += float(REWARDS["successful_verification"])
                             self.agent_contributions[verifier.agent_id]["verifications"] += 1
                             if verifier.agent_id not in best.agents_involved:
                                 best.agents_involved.append(verifier.agent_id)
@@ -1572,6 +1647,7 @@ class SimulationEngine:
                     if random.random() < 0.25:
                         catcher = critic if critic else agent
                         agent.energy += REWARDS["catch_incorrect"]
+                        generation_energy_produced += float(REWARDS["catch_incorrect"])
                         best.contribution_chain.append({"generation": str(generation), "agent_id": agent.agent_id, "type": "catch_incorrect", "detail": f"{agent.agent_id} flagged incorrect work"})
                         board_events.append(
                             {
@@ -1585,8 +1661,33 @@ class SimulationEngine:
                             }
                         )
 
+                if best.reward_split:
+                    problem_rewards = reward_by_problem.setdefault(
+                        best.problem_id,
+                        {
+                            "generation": generation,
+                            "problem_id": best.problem_id,
+                            "tier": best.tier,
+                            "domain": best.domain,
+                            "total_reward": 0.0,
+                            "reward_distribution": {},
+                            "lineage_distribution": {},
+                        },
+                    )
+                    live_lookup = {a.agent_id: a for a in self.agents}
+                    for aid, amount in best.reward_split.items():
+                        reward_by_agent_generation[aid] += float(amount)
+                        parent = live_lookup.get(aid)
+                        if parent:
+                            reward_by_lineage_generation[parent.lineage_id] += float(amount)
+                        problem_rewards["reward_distribution"][aid] = round(problem_rewards["reward_distribution"].get(aid, 0.0) + float(amount), 4)
+                        lineage_id = parent.lineage_id if parent else aid
+                        problem_rewards["lineage_distribution"][str(lineage_id)] = round(problem_rewards["lineage_distribution"].get(str(lineage_id), 0.0) + float(amount), 4)
+                        problem_rewards["total_reward"] = round(float(problem_rewards["total_reward"]) + float(amount), 4)
+
                 if agent.artifact_store and random.random() < agent.genome.strategy["artifact_reuse_bias"]:
                     agent.energy += REWARDS["artifact_reuse"]
+                    generation_energy_produced += float(REWARDS["artifact_reuse"])
                     artifact_reuse += 1
                     totals["artifact_reuse"] += 1
                     self.agent_contributions[agent.agent_id]["artifacts_reused"] += 1
@@ -1626,6 +1727,7 @@ class SimulationEngine:
             offspring: List[Agent] = []
             for agent in self.agents:
                 agent.energy -= self.config.upkeep_cost
+                generation_energy_consumed += float(self.config.upkeep_cost)
                 agent.generation_age += 1
                 last_repro = self.last_reproduction_generation_by_agent.get(agent.agent_id)
                 cooldown_ready = True
@@ -1759,13 +1861,41 @@ class SimulationEngine:
             births_from_top_lineage = births_by_lineage_sorted[0] if births_by_lineage_sorted else 0
             births_from_top_3_lineages = sum(births_by_lineage_sorted[:3]) if births_by_lineage_sorted else 0
             reproduction_concentration = round(births_from_top_3_lineages / max(1, births_total_generation), 6)
-            lineage_reward_totals: Counter[str] = Counter()
-            for aid, reward in generation_points.items():
-                parent = next((agent for agent in self.agents if agent.agent_id == aid), None)
-                if parent:
-                    lineage_reward_totals[parent.lineage_id] += reward
-            reward_total_generation = sum(lineage_reward_totals.values())
-            reward_share_top_lineage = round(max(lineage_reward_totals.values()) / max(1e-9, reward_total_generation), 6) if lineage_reward_totals else 0.0
+            births_top_10pct_agents = sum(sorted(births_by_agent.values(), reverse=True)[: max(1, int(len(current_agents) * 0.10))])
+            birth_share_top_10pct_agents = round(births_top_10pct_agents / max(1, births_total_generation), 6)
+
+            reward_total_generation = float(sum(reward_by_agent_generation.values()))
+            reward_share_top_10pct_agents = top_share(list(reward_by_agent_generation.values()), 0.10) if reward_by_agent_generation else 0.0
+            reward_share_top_lineage = round(max(reward_by_lineage_generation.values()) / max(1e-9, reward_total_generation), 6) if reward_by_lineage_generation else 0.0
+
+            # Energy flow + distribution
+            distribution = energy_distribution_metrics(energies_sorted)
+            p99_median_ratio = distribution["p99_median_ratio"]
+            mean_median_ratio = distribution["mean_median_ratio"]
+            top_10pct_agent_energy_share = top_share(energies_sorted, 0.10)
+
+            current_lineages = {a.lineage_id for a in self.agents}
+            lineage_extinctions = len(lineages_start_generation - current_lineages)
+            lineage_survivals = len(lineages_start_generation & current_lineages)
+            cumulative_lineage_extinctions += lineage_extinctions
+            previous_lineages = set(current_lineages)
+
+            effective_energy_produced = max(float(generation_energy_produced), reward_total_generation)
+            effective_energy_consumed = max(float(generation_energy_consumed), (generation_energy_start + effective_energy_produced) - total_energy)
+
+            flags = self._derive_system_flags(
+                lineage_count=len(current_lineages),
+                top_lineage_share=top_lineage_energy_share,
+                mean_median_ratio=mean_median_ratio,
+                p99_median_ratio=p99_median_ratio,
+            )
+            dpi = dominance_pressure_index(
+                top_lineage_share=top_lineage_energy_share,
+                top3_lineage_share=top_3_lineage_energy_share,
+                gini_value=distribution["gini"],
+                reproduction_concentration=reproduction_concentration,
+            )
+
             reward_multiplier_stats = {
                 **self._generation_reward_multiplier_stats,
                 "total_delta": round(self._generation_reward_multiplier_stats["total_effective_reward"] - self._generation_reward_multiplier_stats["total_base_reward"], 6),
@@ -1774,32 +1904,39 @@ class SimulationEngine:
                 key: (round(value, 6) if isinstance(value, float) else value)
                 for key, value in reward_multiplier_stats.items()
             }
-            top_10pct_agent_energy_share = top_share(energies_sorted, 0.10)
-            current_lineages = {a.lineage_id for a in self.agents}
-            lineage_extinctions = len(previous_lineages - current_lineages)
-            cumulative_lineage_extinctions += lineage_extinctions
-            previous_lineages = set(current_lineages)
 
             logger.log_stream("generation_metrics", {
                 "schema_version": "1.0",
                 "generation": generation,
                 "population": len(self.agents),
                 "total_energy": round(total_energy, 4),
-                "energy_min": round(min(energies_sorted), 4) if energies_sorted else 0.0,
-                "energy_median": round(percentile(energies_sorted, 0.5), 4),
-                "energy_mean": round(sum(energies_sorted) / max(1, len(energies_sorted)), 4),
-                "energy_p90": round(percentile(energies_sorted, 0.9), 4),
+                "energy_min": round(distribution["min"], 4),
+                "energy_median": round(distribution["median"], 4),
+                "energy_mean": round(distribution["mean"], 4),
+                "energy_p90": round(distribution["p90"], 4),
                 "energy_p95": round(percentile(energies_sorted, 0.95), 4),
-                "energy_p99": round(percentile(energies_sorted, 0.99), 4),
-                "energy_max": round(max(energies_sorted), 4) if energies_sorted else 0.0,
+                "energy_p99": round(distribution["p99"], 4),
+                "energy_max": round(distribution["max"], 4),
                 "top_1pct_energy_share": top_share(energies_sorted, 0.01),
                 "top_10pct_energy_share": top_10pct_agent_energy_share,
-                "energy_gini": gini(energies_sorted),
-                "energy_inequality_proxy": round((percentile(energies_sorted, 0.99) / max(1e-9, percentile(energies_sorted, 0.5))), 6),
+                "energy_gini": distribution["gini"],
+                "energy_inequality_proxy": p99_median_ratio,
+                "energy_p99_median_ratio": p99_median_ratio,
+                "energy_mean_median_ratio": mean_median_ratio,
                 "top_lineage_population_share": top_lineage_population_share,
                 "top_lineage_energy_share": top_lineage_energy_share,
                 "top_3_lineage_energy_share": top_3_lineage_energy_share,
                 "top_agents": [{"agent_id": a["agent_id"], "lineage_id": a["lineage_id"], "role": a["role"], "energy": a["energy"]} for a in top_agents],
+                "energy_flow": {
+                    "produced": round(effective_energy_produced, 4),
+                    "consumed": round(effective_energy_consumed, 4),
+                    "in_system": round(total_energy, 4),
+                    "gained_by_lineage": {k: round(v, 4) for k, v in reward_by_lineage_generation.items()},
+                    "gained_by_role": {
+                        role_name: round(sum(reward_by_agent_generation.get(a.agent_id, 0.0) for a in self.agents if a.choose_role() == role_name), 4)
+                        for role_name in ROLE_BUCKETS
+                    },
+                },
                 "births": births,
                 "deaths": deaths,
                 "unique_reproducers_generation": unique_reproducers_generation,
@@ -1812,11 +1949,18 @@ class SimulationEngine:
                 "births_from_top_lineage": births_from_top_lineage,
                 "births_from_top_3_lineages": births_from_top_3_lineages,
                 "reproduction_concentration": reproduction_concentration,
+                "birth_share_top_10pct_agents": birth_share_top_10pct_agents,
+                "birth_share_top_lineage": round(births_from_top_lineage / max(1, births_total_generation), 6),
                 "avg_births_per_reproducer": round(births_total_generation / max(1, unique_reproducers_generation), 6),
                 "lineage_extinction_count": lineage_extinctions,
                 "cumulative_lineage_extinction_count": cumulative_lineage_extinctions,
                 "surviving_lineage_count": len(current_lineages),
                 "reward_concentration_by_lineage": reward_share_top_lineage,
+                "reward_total_generation": round(reward_total_generation, 4),
+                "reward_share_top_10pct_agents": reward_share_top_10pct_agents,
+                "lineage_survival_count": lineage_survivals,
+                "dominance_pressure_index": dpi,
+                "system_flags": flags,
                 "births_blocked_by_cooldown": births_blocked_by_cooldown,
                 "reward_multiplier_stats": reward_multiplier_stats,
                 "artifact_created": artifact_created,
@@ -1825,6 +1969,61 @@ class SimulationEngine:
                 "lineage_energy": lineage_totals,
                 "role_energy": role_totals,
             })
+
+            logger.log_stream("energy_metrics", {
+                "schema_version": "1.0",
+                "generation": generation,
+                "total_energy_produced": round(effective_energy_produced, 4),
+                "total_energy_consumed": round(effective_energy_consumed, 4),
+                "total_energy_in_system": round(total_energy, 4),
+                "energy_distribution": {
+                    "min": round(distribution["min"], 4),
+                    "median": round(distribution["median"], 4),
+                    "mean": round(distribution["mean"], 4),
+                    "p90": round(distribution["p90"], 4),
+                    "p99": round(distribution["p99"], 4),
+                    "max": round(distribution["max"], 4),
+                    "gini": distribution["gini"],
+                    "p99_median_ratio": p99_median_ratio,
+                    "mean_median_ratio": mean_median_ratio,
+                },
+                "energy_gained_per_lineage": {k: round(v, 4) for k, v in reward_by_lineage_generation.items()},
+                "energy_gained_per_role": {
+                    role_name: round(sum(reward_by_agent_generation.get(a.agent_id, 0.0) for a in self.agents if a.choose_role() == role_name), 4)
+                    for role_name in ROLE_BUCKETS
+                },
+            })
+
+            logger.log_stream("dominance_metrics", {
+                "schema_version": "1.0",
+                "generation": generation,
+                "top_lineage_energy_share": top_lineage_energy_share,
+                "top_3_lineage_energy_share": top_3_lineage_energy_share,
+                "lineage_count": len(current_lineages),
+                "lineage_survival_count": lineage_survivals,
+                "lineage_extinction_count": lineage_extinctions,
+                "dominance_pressure_index": dpi,
+                "dominance_emerging": flags["dominance_emerging"],
+                "inequality_extreme": flags["inequality_extreme"],
+                "ecosystem_stable": flags["ecosystem_stable"],
+            })
+
+            logger.log_stream("reproduction_metrics", {
+                "schema_version": "1.0",
+                "generation": generation,
+                "births": births,
+                "births_per_lineage": {k: int(v) for k, v in births_by_lineage.items()},
+                "births_per_agent": {k: int(v) for k, v in births_by_agent.items()},
+                "birth_share_top_10pct_agents": birth_share_top_10pct_agents,
+                "birth_share_top_lineage": round(births_from_top_lineage / max(1, births_total_generation), 6),
+                "reproduction_concentration": reproduction_concentration,
+            })
+
+            for reward_payload in reward_by_problem.values():
+                logger.log_stream("reward_capture_metrics", {
+                    "schema_version": "1.0",
+                    **reward_payload,
+                })
 
             for lineage_id, total in lineage_totals.items():
                 logger.log_stream("lineage_metrics", {
@@ -1911,8 +2110,37 @@ class SimulationEngine:
                 "population": len(self.agents),
                 "births": births,
                 "deaths": deaths,
-                "energy_distribution": {**summarize_energy(energies), "median": round(percentile(energies, 0.5), 4), "p90": round(percentile(energies, 0.9), 4), "p99": round(percentile(energies, 0.99), 4)},
+                "energy_distribution": {
+                    **summarize_energy(energies),
+                    "median": round(distribution["median"], 4),
+                    "p90": round(distribution["p90"], 4),
+                    "p99": round(distribution["p99"], 4),
+                    "gini": distribution["gini"],
+                    "p99_median_ratio": p99_median_ratio,
+                    "mean_median_ratio": mean_median_ratio,
+                },
                 "collaboration_share": round(sum(1 for p in board.problems if p.resolution_mode == "collaborative" and p.solved) / max(1, sum(1 for p in board.problems if p.solved)), 6),
+                "dominance_metrics": {
+                    "top_lineage_energy_share": top_lineage_energy_share,
+                    "top_3_lineage_energy_share": top_3_lineage_energy_share,
+                    "lineage_count": len(current_lineages),
+                    "lineage_survival_count": lineage_survivals,
+                    "lineage_extinction_count": lineage_extinctions,
+                    "dominance_pressure_index": dpi,
+                },
+                "reproduction_concentration_metrics": {
+                    "births": births,
+                    "birth_share_top_10pct_agents": birth_share_top_10pct_agents,
+                    "birth_share_top_lineage": round(births_from_top_lineage / max(1, births_total_generation), 6),
+                    "births_per_lineage": {k: int(v) for k, v in births_by_lineage.items()},
+                    "births_per_agent": {k: int(v) for k, v in births_by_agent.items()},
+                },
+                "reward_capture": {
+                    "total_reward": round(reward_total_generation, 4),
+                    "reward_share_top_lineage": reward_share_top_lineage,
+                    "reward_share_top_10pct_agents": reward_share_top_10pct_agents,
+                },
+                "system_flags": flags,
                 "problem_outcomes": {
                     "solved": solved,
                     "verified": verified,

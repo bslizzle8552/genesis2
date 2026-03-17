@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from src.engine.experiments import run_anti_dominance_experiments, run_experiment_batch
+from src.engine.experiments import run_anti_dominance_experiments, run_experiment_batch, run_targeted_tuning
 
 
 def test_experiment_batch_produces_comparison(tmp_path):
@@ -80,3 +80,40 @@ def test_anti_dominance_matrix_produces_six_runs(tmp_path):
     assert all("dominance_improved_vs_baseline" in row for row in payload["runs"])
     assert all("throughput_degraded_vs_baseline" in row for row in payload["runs"])
     assert all("scoring" in row for row in payload["runs"])
+
+
+def test_targeted_tuning_writes_harvest_registry(tmp_path):
+    spec = {
+        "experiment_id": "targeted_tuning_test",
+        "target_preset": "dist_intelligence_ready_stable",
+        "output_root": str(tmp_path / "runs"),
+        "search": {
+            "timeout_seconds": 30,
+            "search_budget": 2,
+            "target_qualifying_configs": 1,
+            "trials_per_config": 1,
+            "minimum_pass_rate": 0.0,
+            "minimum_composite_score": 0.0
+        },
+        "evaluation_horizon": 8,
+        "base": {
+            "agents": 25,
+            "tasks_per_generation": 2
+        },
+        "sweep": {
+            "mutation_rate": [0.12, 0.16],
+            "upkeep_cost": [5]
+        }
+    }
+    cfg_path = tmp_path / "targeted_tuning.json"
+    cfg_path.write_text(json.dumps(spec), encoding="utf-8")
+
+    result = run_targeted_tuning(cfg_path)
+    registry_path = Path(result["harvest_registry"])
+
+    assert registry_path.exists()
+    payload = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert payload["target_preset"] == "dist_intelligence_ready_stable"
+    assert "goal_conditions" in payload
+    assert "harvested_configs" in payload
+    assert result["searched_config_count"] >= 1

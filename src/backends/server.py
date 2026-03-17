@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -9,6 +10,7 @@ import threading
 from typing import Dict, List
 
 from src.analytics.bvl import events_from_problem_metrics
+from src.analytics.swarm_scoring import HealthySwarmScorer
 
 from src.engine.simulation import SimulationEngine, load_config
 
@@ -29,6 +31,67 @@ LAST_RESULT = {
     "problem_board_events": [],
 }
 RUN_LOCK = threading.Lock()
+TUNING_STATE = {
+    "status": "idle",
+    "mode": None,
+    "message": None,
+    "current_run": 0,
+    "max_runs": 0,
+    "current_parameters": None,
+    "score_progression": [],
+    "best_run": None,
+    "winning_config": None,
+    "error": None,
+}
+
+
+def _stable_swarm_baseline() -> Dict[str, object]:
+    source = DEFAULT_CONFIG if DEFAULT_CONFIG.exists() else LEGACY_DEFAULT_CONFIG
+    cfg = load_config(source)
+    params = asdict(cfg)
+    params.update({
+        "preset_name": "tuning_mode_find_stable_swarm",
+        "agents": 100,
+        "generations": 100,
+        "seed": 42,
+        "run_label": "tuning_mode_baseline",
+        "experiment_id": "tuning_mode",
+        "log_dir": "runs/tuning_mode",
+        "overwrite": False,
+    })
+    return params
+
+
+def _phase2_adaptive_update(params: Dict[str, object], score: Dict[str, object]) -> Dict[str, object]:
+    updated = dict(params)
+    gates = score.get("gates", {}) if isinstance(score, dict) else {}
+    population = score.get("component_metrics", {}).get("population_stability", {}) if isinstance(score, dict) else {}
+
+    if not gates.get("late_population_ok", True):
+        updated["initial_energy"] = min(180, int(updated.get("initial_energy", 100)) + 8)
+        updated["upkeep_cost"] = max(2, int(updated.get("upkeep_cost", 6)) - 1)
+        updated["reproduction_threshold"] = max(95.0, float(updated.get("reproduction_threshold", 130.0)) - 4.0)
+
+    if not gates.get("target_band_stability_ok", True) or not gates.get("population_volatility_ok", True):
+        updated["reproduction_cooldown_enabled"] = True
+        updated["reproduction_cooldown_generations"] = min(5, int(updated.get("reproduction_cooldown_generations", 2)) + 1)
+        updated["mutation_rate"] = max(0.05, float(updated.get("mutation_rate", 0.15)) - 0.01)
+
+    if not gates.get("late_lineage_count_ok", True) or not gates.get("top_lineage_share_ok", True):
+        updated["anti_dominance_enabled"] = True
+        updated["lineage_size_penalty_enabled"] = True
+        updated["lineage_energy_share_penalty_enabled"] = True
+        updated["diversity_bonus"] = min(3.0, float(updated.get("diversity_bonus", 1.0)) + 0.2)
+        updated["immigrant_injection_count"] = min(8, int(updated.get("immigrant_injection_count", 2)) + 1)
+
+    if not gates.get("solve_rate_ok", True):
+        updated["tasks_per_generation"] = max(12, int(updated.get("tasks_per_generation", 15)) - 2)
+
+    if population.get("late_avg_population", 0.0) > 120:
+        updated["upkeep_cost"] = min(12, int(updated.get("upkeep_cost", 6)) + 1)
+        updated["reproduction_threshold"] = min(180.0, float(updated.get("reproduction_threshold", 130.0)) + 2.0)
+
+    return updated
 
 
 def discover_presets() -> List[Dict[str, object]]:
@@ -234,6 +297,69 @@ def config_from_request(payload: dict):
     return cfg
 
 
+def _run_find_stable_swarm(max_runs: int) -> None:
+    scorer = HealthySwarmScorer()
+    params = _stable_swarm_baseline()
+    best_run = None
+
+    TUNING_STATE["status"] = "running"
+    TUNING_STATE["mode"] = "find_stable_swarm"
+    TUNING_STATE["message"] = "Tuning in progress"
+    TUNING_STATE["current_run"] = 0
+    TUNING_STATE["max_runs"] = max_runs
+    TUNING_STATE["score_progression"] = []
+    TUNING_STATE["best_run"] = None
+    TUNING_STATE["winning_config"] = None
+    TUNING_STATE["error"] = None
+
+    try:
+        for i in range(1, max_runs + 1):
+            TUNING_STATE["current_run"] = i
+            current = dict(params)
+            current["run_label"] = f"tuning_mode_find_stable_swarm_r{i}"
+            current["experiment_id"] = "tuning_mode_find_stable_swarm"
+            current["log_dir"] = "runs/tuning_mode/find_stable_swarm"
+            TUNING_STATE["current_parameters"] = current
+
+            # avoid accidentally changing manual run global while tuning
+            cfg = config_from_request({"preset": "ecosystem_optimal_v1.json", **current})
+            result = SimulationEngine(cfg).run()
+            score = scorer.score_run(result)
+            entry = {
+                "run": i,
+                "score": score.get("composite_score", 0.0),
+                "pass": bool(score.get("pass", False)),
+                "run_id": result.get("run_id", ""),
+                "run_dir": result.get("run_dir", ""),
+            }
+            TUNING_STATE["score_progression"].append(entry)
+
+            if best_run is None or entry["score"] > best_run["score"]:
+                best_run = {
+                    **entry,
+                    "gates": score.get("gates", {}),
+                    "config": current,
+                }
+                TUNING_STATE["best_run"] = best_run
+
+            if score.get("pass", False):
+                TUNING_STATE["status"] = "success"
+                TUNING_STATE["message"] = "Stable swarm achieved"
+                TUNING_STATE["winning_config"] = current
+                return
+
+            params = _phase2_adaptive_update(current, score)
+
+        TUNING_STATE["status"] = "failed"
+        TUNING_STATE["message"] = "Tuning completed without meeting stable swarm criteria"
+        TUNING_STATE["winning_config"] = best_run["config"] if best_run else None
+    except Exception as exc:  # pragma: no cover
+        TUNING_STATE["status"] = "error"
+        TUNING_STATE["error"] = str(exc)
+        TUNING_STATE["message"] = "Tuning failed"
+
+
+
 class GenesisHandler(BaseHTTPRequestHandler):
     def _json(self, payload: dict, status: int = 200) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -263,9 +389,31 @@ class GenesisHandler(BaseHTTPRequestHandler):
             self._json({"presets": discover_presets()})
             return
 
+        if self.path == "/api/tuning/state":
+            self._json(TUNING_STATE)
+            return
+
         self._json({"error": "not found"}, status=404)
 
     def do_POST(self) -> None:
+        if self.path == "/api/tuning/start":
+            with RUN_LOCK:
+                if LAST_RESULT["status"] == "running" or TUNING_STATE["status"] == "running":
+                    self._json({"error": "A run or tuning session is already in progress"}, status=409)
+                    return
+                content_len = int(self.headers.get("Content-Length", 0))
+                incoming = json.loads(self.rfile.read(content_len) or b"{}")
+                mode = str(incoming.get("mode", "find_stable_swarm"))
+                max_runs = int(incoming.get("max_runs", 8))
+                if mode != "find_stable_swarm":
+                    self._json({"error": "Only find_stable_swarm mode is currently implemented"}, status=400)
+                    return
+
+                thread = threading.Thread(target=_run_find_stable_swarm, args=(max(1, max_runs),), daemon=True)
+                thread.start()
+            self._json({"status": "running"}, status=202)
+            return
+
         if self.path == "/api/run":
             with RUN_LOCK:
                 if LAST_RESULT["status"] == "running":

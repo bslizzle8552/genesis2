@@ -32,6 +32,14 @@
     .thread h4 { margin:0 0 6px; font-size:13px; }
     .evt { border-left:3px solid #2f6df6; padding:6px 8px; margin:6px 0; background:#0b1326; border-radius:4px; font-size:12px; }
     .evt .meta { color:#8fa7d5; font-size:11px; }
+
+    .tuning-card { border-color:#2f6df6; background:#0f1930; }
+    .tuning-options { display:grid; gap:6px; }
+    .tuning-option { display:flex; align-items:center; gap:8px; font-size:13px; color:#dbe3f0; }
+    .tuning-option input { width:auto; }
+    .tuning-option.disabled { opacity:0.55; }
+    .tuning-success { border-color:#2ea86f; }
+    .deemphasized { opacity:0.45; filter:saturate(0.6); }
   </style>
 </head>
 <body>
@@ -40,7 +48,38 @@
 
   <div class="card">
     <h2>1) Configure Run</h2>
-    <div class="grid">
+    <div class="card tuning-card">
+      <h3>Tuning Modes</h3>
+      <p class="muted">Choose a goal and click <strong>Start Tuning</strong>. Manual presets are de-emphasized while tuning mode is active.</p>
+      <div class="tuning-options" id="tuningOptions">
+        <label class="tuning-option active"><input type="radio" name="tuningMode" value="find_stable_swarm" checked> Find Stable Swarm (100 agents, 100 generations)</label>
+        <label class="tuning-option disabled"><input type="radio" name="tuningMode" value="maximize_growth" disabled> Maximize Growth <span class="muted">(coming soon)</span></label>
+        <label class="tuning-option disabled"><input type="radio" name="tuningMode" value="maximize_diversity" disabled> Maximize Diversity <span class="muted">(coming soon)</span></label>
+        <label class="tuning-option disabled"><input type="radio" name="tuningMode" value="stress_test" disabled> Stress Test (chaos mode) <span class="muted">(coming soon)</span></label>
+      </div>
+      <div style="margin-top:10px;display:flex;gap:8px;align-items:center;">
+        <button id="startTuningBtn" class="primary" style="max-width:220px;">Start Tuning</button>
+        <div id="tuningStatus" class="muted">Idle</div>
+      </div>
+      <div class="grid2" style="margin-top:10px;">
+        <div class="kpi"><div class="muted">Best run so far</div><pre id="tuningBestRun">No runs yet.</pre></div>
+        <div class="kpi"><div class="muted">Current parameter set being tested</div><pre id="tuningCurrentParams">Not started.</pre></div>
+      </div>
+      <div class="card" style="margin-top:10px;">
+        <h3>Score Progression</h3>
+        <pre id="tuningProgression">No scores yet.</pre>
+      </div>
+      <div id="tuningSuccessPanel" class="card tuning-success" style="display:none; margin-top:10px;">
+        <h3>Stable swarm achieved</h3>
+        <pre id="winningConfigOut"></pre>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <button id="saveAsPresetBtn" class="btn-inline">Save as Preset</button>
+          <button id="runRepeatabilityBtn" class="btn-inline">Run Repeatability Test</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="manualConfigSection" class="grid">
       <label>Preset<select id="preset"></select></label>
       <label>Random seed<input id="seed" type="number" value="42"></label>
       <label>Starting agents<input id="agents" type="number" value="10"></label>
@@ -145,11 +184,56 @@
 const fields=["seed","agents","generations","initial_energy","reproduction_threshold","mutation_rate","upkeep_cost","tasks_per_generation","diversity_bonus","diversity_min_lineages","immigrant_injection_count","anti_dominance_enabled","diminishing_reward_enabled","diminishing_reward_k","lineage_size_penalty_enabled","lineage_size_penalty_threshold","lineage_size_penalty_multiplier","lineage_energy_share_penalty_enabled","lineage_energy_share_penalty_threshold","lineage_energy_share_penalty_multiplier","reproduction_cooldown_enabled","reproduction_cooldown_generations","reproduction_cost","child_energy_fraction"];
 let presetMap={}, currentResult=null;
 let selectedPresetName='custom';
+let tuningModeActive=false;
 const v=(id)=>document.getElementById(id).value;
 const n=(id)=>Number(v(id));
 const b=(id)=>String(v(id)).toLowerCase()==='true';
 const tabs=[...document.querySelectorAll('.tab')];
 tabs.forEach(t=>t.onclick=()=>{tabs.forEach(x=>x.classList.remove('active'));t.classList.add('active');document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.getElementById(t.dataset.tab).classList.add('active');});
+
+
+function updateManualConfigVisualState(){
+  const manual = document.getElementById('manualConfigSection');
+  const preset = document.getElementById('preset').closest('label');
+  if(!manual || !preset) return;
+  manual.classList.toggle('deemphasized', tuningModeActive);
+  preset.classList.toggle('deemphasized', tuningModeActive);
+}
+
+function renderTuningState(data){
+  document.getElementById('tuningStatus').textContent = data?.message || data?.status || 'Idle';
+  document.getElementById('tuningBestRun').textContent = data?.best_run ? JSON.stringify(data.best_run, null, 2) : 'No runs yet.';
+  document.getElementById('tuningCurrentParams').textContent = data?.current_parameters ? JSON.stringify(data.current_parameters, null, 2) : 'Not started.';
+  document.getElementById('tuningProgression').textContent = (data?.score_progression||[]).length ? JSON.stringify(data.score_progression, null, 2) : 'No scores yet.';
+
+  const success = data?.status === 'success';
+  document.getElementById('tuningSuccessPanel').style.display = success ? 'block' : 'none';
+  if(success){
+    document.getElementById('winningConfigOut').textContent = JSON.stringify(data.winning_config || {}, null, 2);
+  }
+}
+
+async function startTuningMode(){
+  const mode = document.querySelector('input[name="tuningMode"]:checked')?.value || 'find_stable_swarm';
+  tuningModeActive = true;
+  updateManualConfigVisualState();
+  document.getElementById('startTuningBtn').disabled = true;
+  const res = await fetch('/api/tuning/start', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({mode, max_runs: 8})});
+  const data = await res.json();
+  if(data.error){
+    document.getElementById('startTuningBtn').disabled = false;
+    throw new Error(data.error);
+  }
+
+  let done=false;
+  while(!done){
+    await new Promise(r=>setTimeout(r,1000));
+    const state=await (await fetch('/api/tuning/state')).json();
+    renderTuningState(state);
+    done=['success','failed','error'].includes(state.status);
+  }
+  document.getElementById('startTuningBtn').disabled = false;
+}
 
 function applyPreset(p){ if(!p) return; selectedPresetName=p.preset_name||p.label||'custom'; if(p.schema){ applyUnifiedConfig(p.schema); return; } fields.forEach(k=>{ if(p[k]!==undefined&&p[k]!==null) document.getElementById(k).value=String(p[k]); }); const mix=p.tier_mix||{"1":0.34,"2":0.31,"3":0.21,"4":0.14}; [1,2,3,4].forEach(t=>document.getElementById(`tier${t}`).value=mix[String(t)]); }
 async function loadPresets(){ const data=await (await fetch('/api/presets')).json(); const sel=document.getElementById('preset'); sel.innerHTML=''; data.presets.forEach(p=>{presetMap[p.id]=p; const o=document.createElement('option'); o.value=p.id;o.textContent=p.label;sel.appendChild(o);}); if(data.presets[0]){sel.value=data.presets[0].id;applyPreset(data.presets[0]);} sel.onchange=()=>applyPreset(presetMap[sel.value]); }
@@ -337,9 +421,13 @@ async function startRun(){
 async function poll(){ const data=await (await fetch('/api/state')).json(); const s=document.getElementById('status'); if(data.status==='running'){ const p=data.progress||{}; s.textContent=`Running gen ${p.generation||0}, pop ${p.population||0}`; renderProblemBoard(data.problem_board_events||[]); return false; } if(data.status==='done'){ s.textContent=`Done. ${data.result.summary_path}`; data.result.problem_board_events=data.problem_board_events||[]; renderAll(data.result); document.getElementById('runBtn').disabled=false; return true; } if(data.status==='error'){ s.textContent=`Error: ${data.error}`; document.getElementById('runBtn').disabled=false; return true; } return false; }
 
 document.getElementById('runBtn').onclick=async()=>{ try{document.getElementById('runBtn').disabled=true; await startRun(); let done=false; while(!done){ await new Promise(r=>setTimeout(r,900)); done=await poll(); }}catch(e){document.getElementById('status').textContent=e.message; document.getElementById('runBtn').disabled=false;}};
+document.getElementById('startTuningBtn').onclick=async()=>{ try{ await startTuningMode(); }catch(e){ document.getElementById('tuningStatus').textContent = e.message; document.getElementById('startTuningBtn').disabled=false; }};
+document.getElementById('saveAsPresetBtn').onclick=()=>{ const cfg=document.getElementById('winningConfigOut').textContent||'{}'; const blob = new Blob([cfg], {type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='stable_swarm_winner.json'; a.click(); URL.revokeObjectURL(a.href); };
+document.getElementById('runRepeatabilityBtn').onclick=async()=>{ document.getElementById('tuningStatus').textContent='Repeatability test queued (placeholder).'; };
 ['fGenMin','fGenMax','fTier','fDomain','fStatus','fMode','fLineage','fAgent'].forEach(id=>document.getElementById(id).addEventListener('input', refreshLedger));
 ['pbGen','pbDomain','pbLineage','pbAgent'].forEach(id=>document.getElementById(id).addEventListener('input', refreshProblemBoard));
 loadPresets();
+updateManualConfigVisualState();
 </script>
 </body>
 </html>

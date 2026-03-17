@@ -1,0 +1,16 @@
+{
+  "batch_id": "phase1_orchestrator_sample",
+  "run_count": 3,
+  "output_root": "runs/tuner",
+  "base_config": {
+    "preset_name": "default",
+    "seed": 42,
+    "agents": 12,
+    "generations": 8,
+    "initial_energy": 100,
+    "upkeep_cost": 6,
+    "tasks_per_generation": 5,
+    "reproduction_threshold": 130,
+    "mutation_rate": 0.15
+  }
+}

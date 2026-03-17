@@ -58,17 +58,21 @@
         <label class="tuning-option disabled"><input type="radio" name="tuningMode" value="stress_test" disabled> Stress Test (chaos mode) <span class="muted">(coming soon)</span></label>
       </div>
       <div class="card" style="margin-top:10px;">
-        <h3>Advisory API Configuration (Optional)</h3>
-        <p class="muted">If enabled, the deterministic tuner can merge bounded advice from an API call. Configure endpoint + API key env var name here.</p>
+        <h3>AI Advisor (Anthropic)</h3>
+        <p class="muted">Basic mode: turn on advisor, paste your Anthropic API key, optionally choose model, then start tuning.</p>
         <div class="grid2">
-          <label><span>Enable advisory API</span><input id="advisory_api_enabled" type="checkbox" /></label>
-          <label><span>Advisory mode</span><select id="advisory_mode"><option value="post_run">post_run</option></select></label>
-          <label><span>Advisory endpoint</span><input id="advisory_endpoint" placeholder="https://.../advice" /></label>
-          <label><span>API key (paste directly)</span><input id="advisory_api_key" type="password" placeholder="sk-..." /></label>
-          <label><span>API key environment variable name (optional fallback)</span><input id="advisory_api_key_env" placeholder="GENESIS2_ADVISORY_API_KEY" value="GENESIS2_ADVISORY_API_KEY" /></label>
-          <label><span>Model name</span><input id="advisory_model_name" value="local-advisor" /></label>
-          <label><span>Max advisory calls per session</span><input id="advisory_max_calls_per_session" type="number" value="20" /></label>
+          <label><span>Use AI Advisor</span><input id="advisory_api_enabled" type="checkbox" /></label>
+          <label><span>Anthropic API Key</span><input id="advisory_api_key" type="password" placeholder="sk-ant-..." /></label>
+          <label><span>Model</span><input id="advisory_model_name" value="claude-3-5-sonnet-20241022" /></label>
         </div>
+        <details>
+          <summary>Advanced advisor options</summary>
+          <div class="grid2" style="margin-top:8px;">
+            <label><span>Max advisory calls per session</span><input id="advisory_max_calls_per_session" type="number" value="20" /></label>
+            <label><span>Temperature</span><input id="advisory_temperature" type="number" step="0.05" value="0.1" /></label>
+            <label><span>Debug advisor payloads</span><select id="advisory_debug"><option value="false">false</option><option value="true">true</option></select></label>
+          </div>
+        </details>
         <p class="muted">No silent failures: advisor status and failure reasons are displayed live and in the final report.</p>
       <div class="kpi"><div class="muted">Advisor Status</div><pre id="advisorStatus">UI enabled: false
 Runtime active: false
@@ -284,6 +288,7 @@ function renderTuningState(data){
   document.getElementById('advisorStatus').textContent = [
     `UI enabled: ${Boolean(data?.advisor_enabled_ui)}`,
     `Runtime active: ${Boolean(data?.advisor_active_runtime)}`,
+    `Last advisor status: ${data?.last_advisor_status ?? 'inactive'}`,
     `Failure reason: ${data?.advisor_failure_reason ?? 'null'}`,
     `Calls made: ${Number(data?.advisory_calls_made || 0)}`
   ].join('\n');
@@ -329,12 +334,11 @@ async function startTuningMode(){
   document.getElementById('startTuningBtn').disabled = true;
   const advisory = {
     advisory_api_enabled: document.getElementById('advisory_api_enabled')?.checked || false,
-    advisory_mode: document.getElementById('advisory_mode')?.value || 'post_run',
-    advisory_endpoint: document.getElementById('advisory_endpoint')?.value || '',
     advisory_api_key: document.getElementById('advisory_api_key')?.value || '',
-    advisory_api_key_env: document.getElementById('advisory_api_key_env')?.value || 'GENESIS2_ADVISORY_API_KEY',
-    advisory_model_name: document.getElementById('advisory_model_name')?.value || 'local-advisor',
+    advisory_model_name: document.getElementById('advisory_model_name')?.value || 'claude-3-5-sonnet-20241022',
     advisory_max_calls_per_session: Number(document.getElementById('advisory_max_calls_per_session')?.value || 20),
+    advisory_temperature: Number(document.getElementById('advisory_temperature')?.value || 0.1),
+    advisory_debug: (document.getElementById('advisory_debug')?.value || 'false') === 'true',
   };
   const res = await fetch('/api/tuning/start', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({mode, max_runs: 99999, ...advisory})});
   const data = await res.json();

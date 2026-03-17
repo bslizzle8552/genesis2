@@ -229,3 +229,24 @@ def test_advisory_failure_reason_mapping():
     assert _advisory_failure_reason("no_api_key") == "no API key"
     assert _advisory_failure_reason("invalid_endpoint") == "invalid endpoint"
     assert _advisory_failure_reason("request_failed: timeout") == "request failed"
+
+
+def test_validate_advisor_json_enforces_bounds_and_step_limits():
+    from src.backends.server import _validate_advisor_json
+
+    current = {
+        "reproduction_threshold": 130,
+        "mutation_rate": 0.2,
+    }
+    parsed = {
+        "recommended_config": {
+            "reproduction_threshold": 200,
+            "mutation_rate": 0.22,
+            "unknown": 1,
+        }
+    }
+    accepted, rejected, ok = _validate_advisor_json(parsed, current)
+    assert ok is True
+    assert accepted["mutation_rate"] == 0.22
+    assert "reproduction_threshold: step too large" in rejected
+    assert "unknown: unknown lever" in rejected

@@ -1,0 +1,21 @@
+{
+  "seed": 42,
+  "agents": 200,
+  "generations": 100,
+  "initial_energy": 100,
+  "upkeep_cost": 6,
+  "tasks_per_generation": 60,
+  "log_dir": "runs",
+  "reproduction_threshold": 130,
+  "mutation_rate": 0.28,
+  "diversity_bonus": 0.175,
+  "diversity_min_lineages": 14,
+  "immigrant_injection_count": 7,
+  "tier_mix": {
+    "1": 0.34,
+    "2": 0.31,
+    "3": 0.21,
+    "4": 0.14
+  },
+  "api_access": false
+}

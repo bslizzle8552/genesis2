@@ -7,6 +7,7 @@ def test_discover_presets_lists_experiment_configs():
     assert "experiment_fast.json" in preset_ids
     assert "experiment_default.json" in preset_ids
     assert "experiment_stress.json" in preset_ids
+    assert "ecosystem_optimal_v1.json" in preset_ids
 
 
 def test_config_from_request_uses_preset_values():
@@ -47,3 +48,29 @@ def test_config_from_request_supports_diversity_controls():
     assert cfg.diversity_bonus == 2.0
     assert cfg.diversity_min_lineages == 5
     assert cfg.immigrant_injection_count == 3
+
+
+def test_config_from_request_supports_anti_dominance_controls():
+    cfg = config_from_request({
+        "preset": "ecosystem_optimal_v1.json",
+        "anti_dominance_enabled": True,
+        "diminishing_reward_enabled": True,
+        "diminishing_reward_k": 300.0,
+        "lineage_size_penalty_enabled": True,
+        "lineage_size_penalty_threshold": 40,
+        "lineage_size_penalty_multiplier": 0.75,
+        "reproduction_cooldown_enabled": True,
+        "reproduction_cooldown_generations": 3,
+        "reproduction_cost": 36.0,
+        "child_energy_fraction": 0.4,
+    })
+    assert cfg.anti_dominance_enabled is True
+    assert cfg.diminishing_reward_enabled is True
+    assert cfg.diminishing_reward_k == 300.0
+    assert cfg.lineage_size_penalty_enabled is True
+    assert cfg.lineage_size_penalty_threshold == 40
+    assert cfg.lineage_size_penalty_multiplier == 0.75
+    assert cfg.reproduction_cooldown_enabled is True
+    assert cfg.reproduction_cooldown_generations == 3
+    assert cfg.reproduction_cost == 36.0
+    assert cfg.child_energy_fraction == 0.4

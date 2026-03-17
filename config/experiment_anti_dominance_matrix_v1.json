@@ -1,0 +1,98 @@
+{
+  "experiment_id": "anti_dominance_matrix_v1",
+  "output_root": "runs/experiments",
+  "baseline": {
+    "seed": 42,
+    "agents": 200,
+    "generations": 100,
+    "initial_energy": 100,
+    "upkeep_cost": 6,
+    "tasks_per_generation": 60,
+    "reproduction_threshold": 130,
+    "mutation_rate": 0.28,
+    "diversity_bonus": 0.175,
+    "diversity_min_lineages": 14,
+    "immigrant_injection_count": 7,
+    "tier_mix": {
+      "1": 0.34,
+      "2": 0.31,
+      "3": 0.21,
+      "4": 0.14
+    },
+    "api_access": false,
+    "anti_dominance_enabled": false
+  },
+  "experiments": [
+    {
+      "id": "baseline_optimal_control",
+      "description": "Baseline optimal run with anti-dominance disabled.",
+      "overrides": {
+        "anti_dominance_enabled": false
+      }
+    },
+    {
+      "id": "diminishing_reward_only",
+      "description": "Enable diminishing reward as the only anti-dominance mechanism.",
+      "overrides": {
+        "anti_dominance_enabled": true,
+        "diminishing_reward_enabled": true,
+        "diminishing_reward_k": 260.0,
+        "lineage_size_penalty_enabled": false,
+        "lineage_energy_share_penalty_enabled": false,
+        "reproduction_cooldown_enabled": false
+      }
+    },
+    {
+      "id": "lineage_size_penalty_only",
+      "description": "Enable lineage-size penalty as the only anti-dominance mechanism.",
+      "overrides": {
+        "anti_dominance_enabled": true,
+        "diminishing_reward_enabled": false,
+        "lineage_size_penalty_enabled": true,
+        "lineage_size_penalty_threshold": 45,
+        "lineage_size_penalty_multiplier": 0.82,
+        "lineage_energy_share_penalty_enabled": false,
+        "reproduction_cooldown_enabled": false
+      }
+    },
+    {
+      "id": "reproduction_cooldown_only",
+      "description": "Enable reproduction cooldown as the only anti-dominance mechanism.",
+      "overrides": {
+        "anti_dominance_enabled": true,
+        "diminishing_reward_enabled": false,
+        "lineage_size_penalty_enabled": false,
+        "lineage_energy_share_penalty_enabled": false,
+        "reproduction_cooldown_enabled": true,
+        "reproduction_cooldown_generations": 2
+      }
+    },
+    {
+      "id": "diminishing_reward_plus_cooldown",
+      "description": "Combine diminishing reward with reproduction cooldown.",
+      "overrides": {
+        "anti_dominance_enabled": true,
+        "diminishing_reward_enabled": true,
+        "diminishing_reward_k": 260.0,
+        "lineage_size_penalty_enabled": false,
+        "lineage_energy_share_penalty_enabled": false,
+        "reproduction_cooldown_enabled": true,
+        "reproduction_cooldown_generations": 2
+      }
+    },
+    {
+      "id": "lineage_penalty_plus_cooldown",
+      "description": "Combine lineage-size penalty with reproduction cooldown.",
+      "overrides": {
+        "anti_dominance_enabled": true,
+        "diminishing_reward_enabled": false,
+        "lineage_size_penalty_enabled": true,
+        "lineage_size_penalty_threshold": 45,
+        "lineage_size_penalty_multiplier": 0.82,
+        "lineage_energy_share_penalty_enabled": false,
+        "reproduction_cooldown_enabled": true,
+        "reproduction_cooldown_generations": 2
+      }
+    }
+  ]
+}

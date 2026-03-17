@@ -41,11 +41,14 @@ def discover_presets() -> List[Dict[str, object]]:
         for path in sorted(root.rglob("*.json")):
             if path.name.startswith("_"):
                 continue
+            cfg = json.loads(path.read_text(encoding="utf-8"))
+            # Skip experiment-spec JSON files that cannot be executed as a direct simulation run.
+            if {"target_preset", "search", "sweep", "base"}.issubset(cfg.keys()):
+                continue
             rel_id = str(path.relative_to(root)).replace("\\", "/")
             if rel_id in seen_ids:
                 continue
             label = path.stem.replace("_", " ").title()
-            cfg = json.loads(path.read_text(encoding="utf-8"))
             if "simulation" in cfg:
                 sim = cfg.get("simulation", {})
                 diversity = cfg.get("diversity", {})
@@ -170,7 +173,10 @@ def config_from_request(payload: dict):
     allowed_roots = [CONFIGS_PATH.resolve(), CONFIG_PATH.resolve()]
     if not any(str(preset_path).startswith(str(root)) for root in allowed_roots):
         raise ValueError("invalid preset path")
-    cfg = load_config(preset_path)
+    try:
+        cfg = load_config(preset_path)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"preset '{preset}' is not a runnable simulation config") from exc
 
     cfg.preset_name = str(payload.get("preset_name") or Path(preset).stem or cfg.preset_name)
     integer_fields = [

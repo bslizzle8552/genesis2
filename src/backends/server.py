@@ -89,8 +89,36 @@ def config_from_request(payload: dict):
         raise ValueError("invalid preset path") from exc
 
     cfg = load_config(preset_path if preset_path.exists() else DEFAULT_CONFIG)
-    integer_fields = ["seed", "agents", "generations", "tasks_per_generation", "initial_energy", "upkeep_cost", "diversity_min_lineages", "immigrant_injection_count"]
-    float_fields = ["reproduction_threshold", "mutation_rate", "diversity_bonus"]
+    integer_fields = [
+        "seed",
+        "agents",
+        "generations",
+        "tasks_per_generation",
+        "initial_energy",
+        "upkeep_cost",
+        "diversity_min_lineages",
+        "immigrant_injection_count",
+        "lineage_size_penalty_threshold",
+        "reproduction_cooldown_generations",
+    ]
+    float_fields = [
+        "reproduction_threshold",
+        "mutation_rate",
+        "diversity_bonus",
+        "diminishing_reward_k",
+        "lineage_size_penalty_multiplier",
+        "lineage_energy_share_penalty_threshold",
+        "lineage_energy_share_penalty_multiplier",
+        "reproduction_cost",
+        "child_energy_fraction",
+    ]
+    bool_fields = [
+        "anti_dominance_enabled",
+        "diminishing_reward_enabled",
+        "lineage_size_penalty_enabled",
+        "lineage_energy_share_penalty_enabled",
+        "reproduction_cooldown_enabled",
+    ]
 
     for key in integer_fields:
         if key in payload and payload[key] is not None:
@@ -99,6 +127,10 @@ def config_from_request(payload: dict):
     for key in float_fields:
         if key in payload and payload[key] is not None:
             setattr(cfg, key, float(payload[key]))
+
+    for key in bool_fields:
+        if key in payload and payload[key] is not None:
+            setattr(cfg, key, bool(payload[key]))
 
     if "tier_mix" in payload and isinstance(payload["tier_mix"], dict):
         cfg.tier_mix = {str(k): float(v) for k, v in payload["tier_mix"].items()}

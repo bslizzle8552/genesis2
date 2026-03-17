@@ -46,6 +46,19 @@ class SimulationConfig:
     reward_policy_id: str = "baseline"
     diagnostics_window: int = 12
     overwrite: bool = False
+    anti_dominance_enabled: bool = False
+    diminishing_reward_enabled: bool = False
+    diminishing_reward_k: float = 250.0
+    lineage_size_penalty_enabled: bool = False
+    lineage_size_penalty_threshold: int = 45
+    lineage_size_penalty_multiplier: float = 0.85
+    lineage_energy_share_penalty_enabled: bool = False
+    lineage_energy_share_penalty_threshold: float = 0.30
+    lineage_energy_share_penalty_multiplier: float = 0.80
+    reproduction_cooldown_enabled: bool = False
+    reproduction_cooldown_generations: int = 2
+    reproduction_cost: float = 32.0
+    child_energy_fraction: float = 0.5
 
 
 class SimulationEngine:
@@ -61,6 +74,7 @@ class SimulationEngine:
         self.role_reproduction_counts: Counter[str] = Counter()
         self.agent_lifecycle: Dict[str, Dict[str, float | int | None]] = {}
         self.artifact_registry: Dict[str, Dict[str, object]] = {}
+        self.last_reproduction_generation_by_agent: Dict[str, int] = {}
 
         for _ in range(config.agents):
             agent_id = self._claim_agent_id()
@@ -199,6 +213,30 @@ class SimulationEngine:
         self.agent_lifecycle[agent_id]["lifetime_energy_spent"] = round(
             float(self.agent_lifecycle[agent_id].get("lifetime_energy_spent", 0.0)) + float(amount), 4
         )
+
+    def _lineage_context(self) -> tuple[Counter[str], Dict[str, float], float]:
+        lineage_population = Counter(a.lineage_id for a in self.agents)
+        lineage_energy_totals: Counter[str] = Counter()
+        total_energy = 0.0
+        for agent in self.agents:
+            lineage_energy_totals[agent.lineage_id] += float(agent.energy)
+            total_energy += float(agent.energy)
+        return lineage_population, dict(lineage_energy_totals), total_energy
+
+    def _reward_multiplier(self, recipient: Agent, base_reward: float, lineage_population: Counter[str], lineage_energy_totals: Dict[str, float], total_energy: float) -> float:
+        if not self.config.anti_dominance_enabled or base_reward <= 0:
+            return 1.0
+        multiplier = 1.0
+        if self.config.diminishing_reward_enabled and self.config.diminishing_reward_k > 0:
+            multiplier *= 1.0 / (1.0 + (max(0.0, recipient.energy) / max(1e-9, self.config.diminishing_reward_k)))
+        if self.config.lineage_size_penalty_enabled:
+            if lineage_population.get(recipient.lineage_id, 0) > self.config.lineage_size_penalty_threshold:
+                multiplier *= self.config.lineage_size_penalty_multiplier
+        if self.config.lineage_energy_share_penalty_enabled and total_energy > 0:
+            lineage_share = lineage_energy_totals.get(recipient.lineage_id, 0.0) / total_energy
+            if lineage_share > self.config.lineage_energy_share_penalty_threshold:
+                multiplier *= self.config.lineage_energy_share_penalty_multiplier
+        return max(0.0, float(multiplier))
 
     def _recent_contribution_score(self, agent_id: str, lookback: int = 5) -> float:
         history = self.agent_contribution_history.get(agent_id, [])
@@ -369,15 +407,21 @@ class SimulationEngine:
         payouts[integrator.agent_id] = payouts.get(integrator.agent_id, 0.0) + bounty * weights["integrator"]
 
         agent_lookup = self._agent_lookup()
+        lineage_population, lineage_energy_totals, total_energy = self._lineage_context()
+        effective_payouts: Dict[str, float] = {}
         for aid, reward in payouts.items():
-            if aid in agent_lookup:
-                agent_lookup[aid].energy += reward
+            recipient = agent_lookup.get(aid)
+            if recipient:
+                reward_multiplier = self._reward_multiplier(recipient, reward, lineage_population, lineage_energy_totals, total_energy)
+                effective_reward = reward * reward_multiplier
+                recipient.energy += effective_reward
+                effective_payouts[aid] = effective_reward
                 if aid == integrator.agent_id:
-                    self._record_contribution(aid, "solve", reward=reward)
+                    self._record_contribution(aid, "solve", reward=effective_reward)
                     self._record_contribution(aid, "integrate")
                 else:
-                    self._add_reward(aid, reward)
-        chain["payouts"] = {aid: round(amount, 3) for aid, amount in payouts.items()}
+                    self._add_reward(aid, effective_reward)
+        chain["payouts"] = {aid: round(amount, 3) for aid, amount in effective_payouts.items()}
         chain["attribution_log"].append(f"integrate:{integrator.agent_id}")
         return chain
 
@@ -1299,6 +1343,8 @@ class SimulationEngine:
         phase_first_generation: Dict[str, int] = {}
         detected_phases: List[Dict[str, object]] = []
         reproduction_events: List[Dict[str, Any]] = []
+        previous_lineages: set[str] = {a.lineage_id for a in self.agents}
+        cumulative_lineage_extinctions = 0
 
         for generation in range(1, self.config.generations + 1):
             births = deaths = artifact_reuse = artifact_created = solved = verified = subtasks = 0
@@ -1541,13 +1587,25 @@ class SimulationEngine:
             for agent in self.agents:
                 agent.energy -= self.config.upkeep_cost
                 agent.generation_age += 1
+                last_repro = self.last_reproduction_generation_by_agent.get(agent.agent_id)
+                cooldown_ready = True
+                if self.config.anti_dominance_enabled and self.config.reproduction_cooldown_enabled:
+                    cooldown_ready = last_repro is None or (generation - last_repro) > self.config.reproduction_cooldown_generations
                 if (
                     agent.energy >= self.config.reproduction_threshold
                     and agent.generation_age >= 2
                     and generation_points.get(agent.agent_id, 0.0) >= REWARDS["useful_subtask"] * 0.8
+                    and cooldown_ready
                 ):
                     parent_energy_before = round(agent.energy, 4)
-                    child = reproduce(agent, self._next_agent_id, generation, mutation_rate=self.config.mutation_rate)
+                    child = reproduce(
+                        agent,
+                        self._next_agent_id,
+                        generation,
+                        mutation_rate=self.config.mutation_rate,
+                        reproduction_cost=self.config.reproduction_cost,
+                        child_energy_fraction=self.config.child_energy_fraction,
+                    )
                     parent_energy_after = round(agent.energy, 4)
                     offspring.append(child)
                     self._next_agent_id += 1
@@ -1572,6 +1630,7 @@ class SimulationEngine:
                     if life.get("first_reproduction_generation") is None:
                         life["first_reproduction_generation"] = generation
                     life["last_reproduction_generation"] = generation
+                    self.last_reproduction_generation_by_agent[agent.agent_id] = generation
                     role = agent.choose_role()
                     self.reproduced_roles.add(role)
                     self.role_reproduction_counts[role] += 1
@@ -1646,6 +1705,28 @@ class SimulationEngine:
             share_top5 = round((sum(births_shares[:5]) / births_total_generation), 6) if births_shares and births_total_generation else 0.0
             share_top10 = round((sum(births_shares[:10]) / births_total_generation), 6) if births_shares and births_total_generation else 0.0
 
+            lineage_energy_sorted = sorted(lineage_totals.items(), key=lambda item: item[1], reverse=True)
+            lineage_size_sorted = sorted(lineages.items(), key=lambda item: item[1], reverse=True)
+            top_lineage_energy_share = round(lineage_energy_sorted[0][1] / max(1e-9, total_energy), 6) if lineage_energy_sorted else 0.0
+            top_3_lineage_energy_share = round(sum(v for _, v in lineage_energy_sorted[:3]) / max(1e-9, total_energy), 6) if lineage_energy_sorted else 0.0
+            top_lineage_population_share = round(lineage_size_sorted[0][1] / max(1, len(self.agents)), 6) if lineage_size_sorted else 0.0
+            births_by_lineage_sorted = sorted(births_by_lineage.values(), reverse=True)
+            births_from_top_lineage = births_by_lineage_sorted[0] if births_by_lineage_sorted else 0
+            births_from_top_3_lineages = sum(births_by_lineage_sorted[:3]) if births_by_lineage_sorted else 0
+            reproduction_concentration = round(births_from_top_3_lineages / max(1, births_total_generation), 6)
+            lineage_reward_totals: Counter[str] = Counter()
+            for aid, reward in generation_points.items():
+                parent = next((agent for agent in self.agents if agent.agent_id == aid), None)
+                if parent:
+                    lineage_reward_totals[parent.lineage_id] += reward
+            reward_total_generation = sum(lineage_reward_totals.values())
+            reward_share_top_lineage = round(max(lineage_reward_totals.values()) / max(1e-9, reward_total_generation), 6) if lineage_reward_totals else 0.0
+            top_10pct_agent_energy_share = top_share(energies_sorted, 0.10)
+            current_lineages = {a.lineage_id for a in self.agents}
+            lineage_extinctions = len(previous_lineages - current_lineages)
+            cumulative_lineage_extinctions += lineage_extinctions
+            previous_lineages = set(current_lineages)
+
             logger.log_stream("generation_metrics", {
                 "schema_version": "1.0",
                 "generation": generation,
@@ -1659,8 +1740,12 @@ class SimulationEngine:
                 "energy_p99": round(percentile(energies_sorted, 0.99), 4),
                 "energy_max": round(max(energies_sorted), 4) if energies_sorted else 0.0,
                 "top_1pct_energy_share": top_share(energies_sorted, 0.01),
-                "top_10pct_energy_share": top_share(energies_sorted, 0.10),
+                "top_10pct_energy_share": top_10pct_agent_energy_share,
                 "energy_gini": gini(energies_sorted),
+                "energy_inequality_proxy": round((percentile(energies_sorted, 0.99) / max(1e-9, percentile(energies_sorted, 0.5))), 6),
+                "top_lineage_population_share": top_lineage_population_share,
+                "top_lineage_energy_share": top_lineage_energy_share,
+                "top_3_lineage_energy_share": top_3_lineage_energy_share,
                 "top_agents": [{"agent_id": a["agent_id"], "lineage_id": a["lineage_id"], "role": a["role"], "energy": a["energy"]} for a in top_agents],
                 "births": births,
                 "deaths": deaths,
@@ -1671,7 +1756,14 @@ class SimulationEngine:
                 "birth_share_top_1": share_top1,
                 "birth_share_top_5": share_top5,
                 "birth_share_top_10": share_top10,
+                "births_from_top_lineage": births_from_top_lineage,
+                "births_from_top_3_lineages": births_from_top_3_lineages,
+                "reproduction_concentration": reproduction_concentration,
                 "avg_births_per_reproducer": round(births_total_generation / max(1, unique_reproducers_generation), 6),
+                "lineage_extinction_count": lineage_extinctions,
+                "cumulative_lineage_extinction_count": cumulative_lineage_extinctions,
+                "surviving_lineage_count": len(current_lineages),
+                "reward_concentration_by_lineage": reward_share_top_lineage,
                 "artifact_created": artifact_created,
                 "artifact_reused": artifact_reuse,
                 "collaboration_share_generation": round(sum(1 for p in board.problems if p.resolution_mode == "collaborative" and p.solved) / max(1, sum(1 for p in board.problems if p.solved)), 6),

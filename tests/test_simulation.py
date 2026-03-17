@@ -119,3 +119,26 @@ def test_run_label_is_sanitized_in_folder_name(tmp_path):
     run_dir = Path(result["summary_path"]).parent
 
     assert run_dir.name.startswith("My-Run-Label__")
+
+
+def test_generation_metrics_include_dominance_fields(tmp_path):
+    cfg = SimulationConfig(seed=13, agents=8, generations=5, tasks_per_generation=4, log_dir=str(tmp_path), anti_dominance_enabled=True, diminishing_reward_enabled=True)
+    result = SimulationEngine(cfg).run()
+    run_dir = Path(result["summary_path"]).parent
+    metrics_path = run_dir / "generation_metrics.jsonl"
+    lines = [line for line in metrics_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    row = json.loads(lines[-1])
+
+    for field in [
+        "top_lineage_population_share",
+        "top_lineage_energy_share",
+        "top_3_lineage_energy_share",
+        "energy_inequality_proxy",
+        "births_from_top_lineage",
+        "births_from_top_3_lineages",
+        "reproduction_concentration",
+        "lineage_extinction_count",
+        "surviving_lineage_count",
+        "reward_concentration_by_lineage",
+    ]:
+        assert field in row

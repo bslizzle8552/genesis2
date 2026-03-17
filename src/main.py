@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 
-from src.engine.experiments import run_experiment_batch
+from src.engine.experiments import run_anti_dominance_experiments, run_experiment_batch
 from src.engine.simulation import SimulationEngine, load_config
 
 
@@ -11,10 +11,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Genesis2 simulation runner")
     parser.add_argument("--config", default="config/default.json")
     parser.add_argument("--experiment-config", default=None)
+    parser.add_argument("--anti-dominance-config", default=None)
     args = parser.parse_args()
 
     if args.experiment_config:
         result = run_experiment_batch(args.experiment_config)
+        print(json.dumps(result, indent=2))
+        return
+
+    if args.anti_dominance_config:
+        result = run_anti_dominance_experiments(args.anti_dominance_config)
         print(json.dumps(result, indent=2))
         return
 

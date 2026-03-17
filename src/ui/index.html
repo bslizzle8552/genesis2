@@ -52,7 +52,7 @@
       <h3>Adaptive Tuning Rig</h3>
       <p class="muted">Choose one goal-driven mode and click <strong>Start Tuning</strong>. Manual preset controls are de-emphasized while this rig is active.</p>
       <div class="tuning-options" id="tuningOptions">
-        <label class="tuning-option active"><input type="radio" name="tuningMode" value="find_stable_swarm" checked> Find Stable Swarm (100 agents, 100 generations)</label>
+        <label class="tuning-option active"><input type="radio" name="tuningMode" value="find_stable_swarm" checked> Find Stable Swarm (25 agents -> 100 agents, 100 generations)</label>
         <label class="tuning-option disabled"><input type="radio" name="tuningMode" value="maximize_growth" disabled> Maximize Growth <span class="muted">(coming soon)</span></label>
         <label class="tuning-option disabled"><input type="radio" name="tuningMode" value="maximize_diversity" disabled> Maximize Diversity <span class="muted">(coming soon)</span></label>
         <label class="tuning-option disabled"><input type="radio" name="tuningMode" value="stress_test" disabled> Stress Test (chaos mode) <span class="muted">(coming soon)</span></label>
@@ -64,6 +64,11 @@
       <div class="grid2" style="margin-top:10px;">
         <div class="kpi"><div class="muted">Live status</div><pre id="tuningLiveStatus">Idle.</pre></div>
         <div class="kpi"><div class="muted">Current parameter set</div><pre id="tuningCurrentParams">Not started.</pre></div>
+      </div>
+      <div class="card" style="margin-top:10px;">
+        <h3>Tuning Summary Dashboard</h3>
+        <pre id="tuningReadableSummary">No session summary yet.</pre>
+        <details><summary>Advanced details</summary><pre id="tuningAdvancedDetails">No technical details yet.</pre></details>
       </div>
       <div class="card" style="margin-top:10px;">
         <h3>Run stream</h3>
@@ -210,6 +215,27 @@ function renderTuningState(data){
   document.getElementById('tuningBestRun').textContent = data?.best_run ? JSON.stringify(data.best_run, null, 2) : 'No runs yet.';
   document.getElementById('tuningCurrentParams').textContent = data?.current_parameters ? JSON.stringify(data.current_parameters, null, 2) : 'Not started.';
   document.getElementById('tuningProgression').textContent = (data?.score_progression||[]).length ? JSON.stringify(data.score_progression, null, 2) : 'No scores yet.';
+  const summary = data?.human_readable_summary;
+  if(summary){
+    document.getElementById('tuningReadableSummary').textContent = JSON.stringify({
+      session_outcome_banner: summary.session_outcome_banner,
+      goal_card: summary.goal_card,
+      best_run_card: summary.best_run_card,
+      failure_summary_card: summary.failure_summary_card,
+      parameter_journey: summary.parameter_journey,
+      score_progression_chart: summary.score_progression_chart,
+      population_outcome_chart: summary.population_outcome_chart,
+      recommendation_card: summary.recommendation_card,
+      plain_english_run_explanations: summary.plain_english_run_explanations,
+    }, null, 2);
+    document.getElementById('tuningAdvancedDetails').textContent = JSON.stringify({
+      advisory_usage: data?.advisory_usage,
+      advisory_settings: data?.advisory_settings,
+      session_diagnostics: data?.session_diagnostics,
+      final_summary_path: data?.final_summary_path,
+      human_readable_report_path: data?.human_readable_report_path,
+    }, null, 2);
+  }
   document.getElementById('tuningLiveStatus').textContent = JSON.stringify({
     mode: data?.mode,
     elapsed_seconds: data?.elapsed_seconds,

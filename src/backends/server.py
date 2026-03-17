@@ -6,11 +6,14 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import threading
 import time
 from collections import deque
+from statistics import mean
 from typing import Deque, Dict, List
+from urllib import error, request
 import uuid
 
 from src.analytics.bvl import events_from_problem_metrics
@@ -64,6 +67,31 @@ TUNING_STATE = {
     "final_summary_path": None,
     "error": None,
     "session_diagnostics": None,
+    "goal_profile": None,
+    "advisory_settings": None,
+    "advisory_usage": None,
+    "human_readable_summary": None,
+    "human_readable_report_path": None,
+}
+
+GOAL_PROFILE = {
+    "mode": "find_stable_swarm",
+    "starting_agents_target": 25,
+    "target_population": 100,
+    "target_reach_generation": 80,
+    "stability_band": [90, 110],
+    "horizon_generations": 100,
+}
+
+PLAIN_LABELS = {
+    "healthy": "Stable and healthy swarm behavior.",
+    "near_healthy": "Near healthy behavior with minor stability gaps.",
+    "failed_overshoot": "Population grew too fast and exceeded the healthy range.",
+    "failed_collapse": "Population fell too low to recover.",
+    "failed_low_diversity": "Too few lineages survived.",
+    "failed_dominance": "Too much of the swarm was controlled by one lineage.",
+    "failed_instability": "Population became too volatile to stabilize.",
+    "failed_wrong_start": "Run started from the wrong population instead of 25 agents.",
 }
 
 
@@ -72,6 +100,228 @@ def _stable_swarm_baseline() -> Dict[str, object]:
     params = build_find_stable_swarm_baseline(source)
     params.update({"seed": 42, "run_label": "adaptive_tuning_rig_baseline", "experiment_id": "adaptive_tuning_rig", "log_dir": "runs/tuning_sessions"})
     return params
+
+
+def _advisory_defaults() -> Dict[str, object]:
+    return {
+        "advisory_api_enabled": False,
+        "advisory_mode": "post_run",
+        "advisory_timeout_seconds": 6,
+        "advisory_max_calls_per_session": 20,
+        "advisory_model_name": os.getenv("GENESIS2_ADVISORY_MODEL", "local-advisor"),
+        "advisory_temperature": 0.1,
+        "advisory_endpoint": os.getenv("GENESIS2_ADVISORY_ENDPOINT", ""),
+        "advisory_api_key_env": os.getenv("GENESIS2_ADVISORY_API_KEY_ENV", "GENESIS2_ADVISORY_API_KEY"),
+    }
+
+
+def _metric_from_timeline(timeline: List[Dict[str, object]], key: str, default: float = 0.0) -> float:
+    if not timeline:
+        return default
+    return float(timeline[-1].get(key, default) or default)
+
+
+def _build_advisory_payload(*, session_id: str, run_number: int, elapsed_seconds: int, current: Dict[str, object], result: Dict[str, object], metrics: Dict[str, object], run_records: List[Dict[str, object]]) -> Dict[str, object]:
+    timeline = list(result.get("timeline", []))
+    populations = [int(step.get("population", 0)) for step in timeline]
+    late = populations[-20:] if populations else []
+    peak = max(timeline, key=lambda item: int(item.get("population", 0))) if timeline else {}
+    dominance = timeline[-1].get("dominance_metrics", {}) if timeline else {}
+    solves = int(result.get("totals", {}).get("solved", 0))
+    possible = max(1, int(current.get("generations", 100)) * int(current.get("tasks_per_generation", 60)))
+    previous = []
+    for rec in run_records[-5:]:
+        prev = {
+            "run": rec.get("run_in_batch"),
+            "label": rec.get("label"),
+            "score": rec.get("score"),
+            "final_population": rec.get("metrics", {}).get("final_population"),
+            "changed_parameters": rec.get("changed_parameters", {}),
+            "score_delta": rec.get("score_delta", 0.0),
+        }
+        previous.append(prev)
+    return {
+        "session_info": {
+            "tuning_session_id": session_id,
+            "run_id": str(result.get("run_id", "")),
+            "attempt_number": run_number,
+            "elapsed_session_time_seconds": elapsed_seconds,
+        },
+        "goal_profile": GOAL_PROFILE,
+        "parameters_used": {
+            k: current.get(k)
+            for k in [
+                "agents", "generations", "initial_energy", "reproduction_threshold", "mutation_rate", "upkeep_cost",
+                "tasks_per_generation", "diversity_bonus", "diversity_min_lineages", "anti_dominance_enabled",
+                "lineage_size_penalty_enabled", "lineage_energy_share_penalty_enabled", "reproduction_cooldown_enabled",
+                "reproduction_cooldown_generations",
+            ]
+        },
+        "observed_results": {
+            "final_population": int(result.get("final_population", 0)),
+            "peak_population": int(peak.get("population", 0) or 0),
+            "generation_of_peak_population": int(peak.get("generation", 0) or 0),
+            "lineage_count": int(metrics.get("lineage_count", 0)),
+            "diversity_score": float(metrics.get("diversity_score", 0.0)),
+            "solve_rate": round(solves / possible, 6),
+            "births_total": int(sum(int(step.get("births", 0)) for step in timeline)),
+            "births_late_run": int(sum(int(step.get("births", 0)) for step in timeline[-20:])),
+            "extinction_events": int(sum(int(step.get("dominance_metrics", {}).get("lineage_extinction_count", 0)) for step in timeline)),
+            "top_lineage_share": float(metrics.get("top_lineage_share", 1.0)),
+            "top_3_lineage_share": float(metrics.get("top_3_lineage_share", 1.0)),
+            "inequality_metrics": {
+                "energy_gini": float(dominance.get("energy_gini", 0.0) or 0.0),
+                "reward_share_top_lineage": float(dominance.get("reward_share_top_lineage", 0.0) or 0.0),
+            },
+            "late_run_mean_population": round(mean(late), 4) if late else 0.0,
+            "late_run_population_volatility": float(metrics.get("late_population_std", 0.0)),
+            "target_band_reached": bool(metrics.get("hard_gates", {}).get("reaches_target_by_generation_80_ok", False)),
+            "target_band_sustained": bool(metrics.get("passed_hard_gates", False)),
+            "outcome_label": metrics.get("label"),
+            "score": float(metrics.get("score", 0.0)),
+            "failure_reasons": metrics.get("diagnosis", []),
+            "early_stop_reason": TUNING_STATE.get("early_stop_reason"),
+        },
+        "recent_tuning_history": previous,
+    }
+
+
+def _default_advisory_response() -> Dict[str, object]:
+    return {
+        "diagnosis": {
+            "primary_failure_mode": "mixed",
+            "secondary_failure_modes": [],
+            "reasoning_summary": "No API recommendation available.",
+        },
+        "parameter_recommendations": {},
+        "suggested_next_config": {},
+        "confidence": 0.0,
+        "operator_summary": "Fallback to deterministic tuner.",
+    }
+
+
+def _call_advisory_api(payload: Dict[str, object], settings: Dict[str, object]) -> Dict[str, object]:
+    endpoint = str(settings.get("advisory_endpoint") or "").strip()
+    if not endpoint:
+        return {"error": "endpoint_missing", "raw": None, "parsed": _default_advisory_response()}
+    body = json.dumps({
+        "model": settings.get("advisory_model_name"),
+        "temperature": float(settings.get("advisory_temperature", 0.1)),
+        "mode": settings.get("advisory_mode", "post_run"),
+        "payload": payload,
+    }).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    api_key = os.getenv(str(settings.get("advisory_api_key_env", "GENESIS2_ADVISORY_API_KEY")), "")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = request.Request(endpoint, data=body, headers=headers, method="POST")
+    try:
+        timeout = float(settings.get("advisory_timeout_seconds", 6))
+        with request.urlopen(req, timeout=timeout) as resp:
+            raw_text = resp.read().decode("utf-8")
+        parsed = json.loads(raw_text)
+        return {"error": None, "raw": raw_text, "parsed": parsed}
+    except (error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+        return {"error": str(exc), "raw": None, "parsed": _default_advisory_response()}
+
+
+def _safe_change(current: Dict[str, object], key: str, action: str, delta: float, min_v: float, max_v: float, max_step: float) -> float:
+    value = float(current.get(key, 0.0))
+    bounded = max(-max_step, min(max_step, float(delta)))
+    if action == "increase":
+        value += abs(bounded)
+    elif action == "decrease":
+        value -= abs(bounded)
+    return max(min_v, min(max_v, value))
+
+
+def _merge_advisory_with_deterministic(current: Dict[str, object], deterministic: Dict[str, object], advisory: Dict[str, object]) -> tuple[Dict[str, object], str]:
+    merged = dict(deterministic)
+    recs = advisory.get("parameter_recommendations", {}) if isinstance(advisory, dict) else {}
+    safety = {
+        "reproduction_threshold": (90.0, 220.0, 10.0),
+        "mutation_rate": (0.05, 0.5, 0.04),
+        "upkeep_cost": (2.0, 14.0, 2.0),
+        "tasks_per_generation": (20.0, 120.0, 10.0),
+        "diversity_bonus": (0.05, 0.8, 0.06),
+        "diversity_min_lineages": (8.0, 28.0, 2.0),
+    }
+    applied = []
+    for key, (mn, mx, max_step) in safety.items():
+        rule = recs.get(key)
+        if not isinstance(rule, dict):
+            continue
+        action = str(rule.get("action", "keep"))
+        if action not in {"increase", "decrease", "keep"}:
+            continue
+        if action == "keep":
+            continue
+        delta = float(rule.get("delta", 0.0) or 0.0)
+        adv_value = _safe_change(current, key, action, delta, mn, mx, max_step)
+        det_delta = float(deterministic.get(key, current.get(key, 0.0))) - float(current.get(key, 0.0))
+        if det_delta == 0.0 or (det_delta > 0 and adv_value >= float(current.get(key, 0.0))) or (det_delta < 0 and adv_value <= float(current.get(key, 0.0))):
+            merged[key] = int(round(adv_value)) if key in {"upkeep_cost", "tasks_per_generation", "diversity_min_lineages"} else round(adv_value, 6)
+            applied.append(key)
+    source = "merged_deterministic_api" if applied else "deterministic_tuner"
+    return merged, f"{source}; applied={applied}" if applied else source
+
+
+def _render_human_summary(*, final_outcome: str, best_run: Dict[str, object] | None, failure_modes: Dict[str, int], run_records: List[Dict[str, object]], advisory_usage: Dict[str, object]) -> Dict[str, object]:
+    best_metrics = (best_run or {}).get("metrics", {})
+    best_label = str((best_run or {}).get("label", "unknown"))
+    return {
+        "session_outcome_banner": final_outcome,
+        "goal_card": {
+            "goal": "Grow from 25 -> 100 -> stable",
+            "horizon": "100 generations",
+            "stability_target": "90-110 late-run band",
+        },
+        "best_run_card": {
+            "best_score": (best_run or {}).get("score"),
+            "final_population": best_metrics.get("final_population"),
+            "peak_population": best_metrics.get("peak_population"),
+            "generation_of_peak_population": best_metrics.get("generation_of_peak_population"),
+            "lineage_count": best_metrics.get("lineage_count"),
+            "diversity_score": best_metrics.get("diversity_score"),
+            "top_lineage_share": best_metrics.get("top_lineage_share"),
+            "top_3_lineage_share": best_metrics.get("top_3_lineage_share"),
+            "target_band_reached": best_metrics.get("hard_gates", {}).get("reaches_target_by_generation_80_ok"),
+            "target_band_sustained": best_metrics.get("passed_hard_gates"),
+            "outcome_plain_english": PLAIN_LABELS.get(best_label, best_label),
+            "why_best": "Highest composite run score under safety gates.",
+        },
+        "failure_summary_card": {
+            "overshoot_failures": failure_modes.get("failed_overshoot", 0),
+            "collapse_failures": failure_modes.get("failed_collapse", 0),
+            "low_diversity_failures": failure_modes.get("failed_low_diversity", 0),
+            "dominance_failures": failure_modes.get("failed_dominance", 0),
+            "instability_failures": failure_modes.get("failed_instability", 0),
+            "near_healthy_runs": failure_modes.get("near_healthy", 0),
+            "healthy_runs": failure_modes.get("healthy", 0),
+        },
+        "parameter_journey": [
+            {
+                "run": rec.get("run_in_batch"),
+                "reproduction_threshold": rec.get("params", {}).get("reproduction_threshold"),
+                "mutation_rate": rec.get("params", {}).get("mutation_rate"),
+                "upkeep_cost": rec.get("params", {}).get("upkeep_cost"),
+                "tasks_per_generation": rec.get("params", {}).get("tasks_per_generation"),
+                "diversity_bonus": rec.get("params", {}).get("diversity_bonus"),
+                "diversity_min_lineages": rec.get("params", {}).get("diversity_min_lineages"),
+            }
+            for rec in run_records
+        ],
+        "score_progression_chart": [{"run": rec.get("run_in_batch"), "score": rec.get("score")} for rec in run_records],
+        "population_outcome_chart": [{"run": rec.get("run_in_batch"), "final_population": rec.get("metrics", {}).get("final_population")} for rec in run_records],
+        "recommendation_card": {
+            "summary": "Next best direction is lower growth pressure and stronger diversity support.",
+            "api_note": advisory_usage.get("operator_summaries", []),
+        },
+        "plain_english_run_explanations": PLAIN_LABELS,
+        "advanced_details": {
+            "raw_json_available": True,
+        },
+    }
 
 
 def _phase2_adaptive_update(params: Dict[str, object], score: Dict[str, object]) -> Dict[str, object]:
@@ -305,7 +555,7 @@ def config_from_request(payload: dict):
     return cfg
 
 
-def _run_find_stable_swarm(max_runs: int) -> None:
+def _run_find_stable_swarm(max_runs: int, advisory_settings: Dict[str, object] | None = None) -> None:
     session_id = f"tuning_{uuid.uuid4().hex[:10]}"
     started = time.monotonic()
     started_iso = datetime.now(timezone.utc).isoformat()
@@ -321,6 +571,10 @@ def _run_find_stable_swarm(max_runs: int) -> None:
     failure_modes: Dict[str, int] = {}
     best_run: Dict[str, object] | None = None
     candidate_configs: List[Dict[str, object]] = []
+    advisory_settings = {**_advisory_defaults(), **(advisory_settings or {})}
+    advisory_calls = 0
+    advisory_accepted = 0
+    operator_summaries: List[str] = []
 
     TUNING_STATE["status"] = "running"
     TUNING_STATE["mode"] = "find_stable_swarm"
@@ -344,6 +598,11 @@ def _run_find_stable_swarm(max_runs: int) -> None:
     TUNING_STATE["final_outcome"] = None
     TUNING_STATE["final_summary_path"] = None
     TUNING_STATE["error"] = None
+    TUNING_STATE["goal_profile"] = GOAL_PROFILE
+    TUNING_STATE["advisory_settings"] = advisory_settings
+    TUNING_STATE["advisory_usage"] = {"calls": 0, "accepted": 0, "operator_summaries": []}
+    TUNING_STATE["human_readable_summary"] = None
+    TUNING_STATE["human_readable_report_path"] = None
     TUNING_STATE["session_diagnostics"] = {
         "improving_parameters": {},
         "dominance_worsening_parameters": {},
@@ -387,6 +646,10 @@ def _run_find_stable_swarm(max_runs: int) -> None:
             cfg = config_from_request({"preset": "ecosystem_optimal_v1.json", **current})
             result = SimulationEngine(cfg).run()
             metrics = score_and_label_run(result)
+            timeline = list(result.get("timeline", []))
+            peak = max(timeline, key=lambda item: int(item.get("population", 0))) if timeline else {}
+            metrics["peak_population"] = int(peak.get("population", 0) or 0)
+            metrics["generation_of_peak_population"] = int(peak.get("generation", 0) or 0)
 
             run_record = {
                 "run_id": uuid.uuid4().hex,
@@ -399,6 +662,8 @@ def _run_find_stable_swarm(max_runs: int) -> None:
                 "label": metrics["label"],
                 "metrics": metrics,
             }
+            prior_score = float(run_records[-1]["score"]) if run_records else None
+            run_record["score_delta"] = round(float(metrics["score"]) - prior_score, 4) if prior_score is not None else 0.0
             run_records.append(run_record)
             failure_modes[metrics["label"]] = failure_modes.get(metrics["label"], 0) + 1
             TUNING_STATE["latest_outcome_label"] = metrics["label"]
@@ -444,10 +709,59 @@ def _run_find_stable_swarm(max_runs: int) -> None:
                 TUNING_STATE["final_outcome"] = "Promising config found, repeatability not yet proven"
                 break
 
-            updated, reason = adjust_parameters(current, metrics)
-            updated["agents"] = 25
+            deterministic_updated, reason = adjust_parameters(current, metrics)
+            deterministic_updated["agents"] = 25
+            advice_record = {
+                "advisory_input": None,
+                "raw_advisory_response": None,
+                "parsed_advisory_response": None,
+                "advice_accepted": False,
+                "applied_config_source": "deterministic_tuner",
+                "merge_explanation": "deterministic baseline",
+            }
+            updated = deterministic_updated
+
+            can_call_advisory = bool(advisory_settings.get("advisory_api_enabled")) and advisory_calls < int(advisory_settings.get("advisory_max_calls_per_session", 0))
+            if can_call_advisory:
+                advisory_payload = _build_advisory_payload(
+                    session_id=session_id,
+                    run_number=i,
+                    elapsed_seconds=elapsed,
+                    current=current,
+                    result=result,
+                    metrics=metrics,
+                    run_records=run_records,
+                )
+                advisory_result = _call_advisory_api(advisory_payload, advisory_settings)
+                advisory_calls += 1
+                parsed = advisory_result.get("parsed") if isinstance(advisory_result, dict) else _default_advisory_response()
+                merged, merge_explanation = _merge_advisory_with_deterministic(current, deterministic_updated, parsed if isinstance(parsed, dict) else _default_advisory_response())
+                merged["agents"] = 25
+                advice_record = {
+                    "advisory_input": advisory_payload,
+                    "raw_advisory_response": advisory_result.get("raw") if isinstance(advisory_result, dict) else None,
+                    "parsed_advisory_response": parsed,
+                    "advice_accepted": merge_explanation.startswith("merged_deterministic_api"),
+                    "applied_config_source": "api_assisted_tuner" if merge_explanation.startswith("merged_deterministic_api") else "deterministic_tuner",
+                    "merge_explanation": merge_explanation if not advisory_result.get("error") else f"{merge_explanation}; api_error={advisory_result.get('error')}",
+                }
+                if advice_record["advice_accepted"]:
+                    advisory_accepted += 1
+                if isinstance(parsed, dict) and parsed.get("operator_summary"):
+                    operator_summaries.append(str(parsed.get("operator_summary")))
+                updated = merged
+
             params = updated
+            changed_parameters = {
+                k: {"from": current.get(k), "to": updated.get(k)}
+                for k in ["reproduction_threshold", "mutation_rate", "upkeep_cost", "tasks_per_generation", "diversity_bonus", "diversity_min_lineages"]
+                if current.get(k) != updated.get(k)
+            }
+            run_records[-1]["changed_parameters"] = changed_parameters
+            run_records[-1]["advisory"] = advice_record
+            run_records[-1]["final_applied_config"] = updated
             TUNING_STATE["latest_adjustment_reason"] = reason
+            TUNING_STATE["advisory_usage"] = {"calls": advisory_calls, "accepted": advisory_accepted, "operator_summaries": operator_summaries[-5:]}
 
             diagnoses = set(metrics.get("diagnosis", []))
             if improved:
@@ -509,9 +823,21 @@ def _run_find_stable_swarm(max_runs: int) -> None:
             repeatability=TUNING_STATE.get("repeatability"),
             early_stop_reason=TUNING_STATE.get("early_stop_reason"),
             session_diagnostics=TUNING_STATE.get("session_diagnostics"),
+            advisory_settings=advisory_settings,
+            advisory_usage={"calls": advisory_calls, "accepted": advisory_accepted, "operator_summaries": operator_summaries[-5:]},
         )
+        human_summary = _render_human_summary(
+            final_outcome=TUNING_STATE.get("final_outcome") or "No Equilibrium Found",
+            best_run=best_run,
+            failure_modes=failure_modes,
+            run_records=run_records,
+            advisory_usage={"operator_summaries": operator_summaries[-5:]},
+        )
+        summary["human_readable_summary"] = human_summary
         summary_path = session_dir / "final_session_summary.json"
         summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        markdown_report_path = session_dir / "final_session_report.md"
+        markdown_report_path.write_text(_build_markdown_report(summary), encoding="utf-8")
 
         runs_jsonl = session_dir / "runs.jsonl"
         with runs_jsonl.open("w", encoding="utf-8") as handle:
@@ -519,6 +845,8 @@ def _run_find_stable_swarm(max_runs: int) -> None:
                 handle.write(json.dumps(record) + "\n")
 
         TUNING_STATE["final_summary_path"] = str(summary_path)
+        TUNING_STATE["human_readable_summary"] = human_summary
+        TUNING_STATE["human_readable_report_path"] = str(markdown_report_path)
     except Exception as exc:  # pragma: no cover
         TUNING_STATE["status"] = "error"
         TUNING_STATE["error"] = str(exc)
@@ -560,7 +888,7 @@ def _run_repeatability_validation(base_params: Dict[str, object], session_id: st
     }
 
 
-def _build_tuning_summary(*, session_id: str, started_at: str, elapsed_seconds: int, run_records: List[Dict[str, object]], best_run: Dict[str, object] | None, candidate_configs: List[Dict[str, object]], failure_modes: Dict[str, int], final_outcome: str, repeatability: Dict[str, object] | None, early_stop_reason: str | None, session_diagnostics: Dict[str, object] | None = None) -> Dict[str, object]:
+def _build_tuning_summary(*, session_id: str, started_at: str, elapsed_seconds: int, run_records: List[Dict[str, object]], best_run: Dict[str, object] | None, candidate_configs: List[Dict[str, object]], failure_modes: Dict[str, int], final_outcome: str, repeatability: Dict[str, object] | None, early_stop_reason: str | None, session_diagnostics: Dict[str, object] | None = None, advisory_settings: Dict[str, object] | None = None, advisory_usage: Dict[str, object] | None = None) -> Dict[str, object]:
     dominant = sorted(failure_modes.items(), key=lambda kv: kv[1], reverse=True)
     top_candidates = sorted(candidate_configs, key=lambda c: c["score"], reverse=True)[:3]
     suggested = "Increase anti-dominance pressure and reduce mutation volatility" if failure_modes.get("failed_overshoot", 0) > failure_modes.get("failed_collapse", 0) else "Increase initial energy and lower reproduction threshold to avoid collapse"
@@ -579,8 +907,51 @@ def _build_tuning_summary(*, session_id: str, started_at: str, elapsed_seconds: 
         "early_stop_reason": early_stop_reason,
         "suggested_next_tuning_direction": suggested,
         "final_outcome": final_outcome,
+        "goal_profile": GOAL_PROFILE,
+        "advisory_settings": advisory_settings or _advisory_defaults(),
+        "advisory_usage": advisory_usage or {"calls": 0, "accepted": 0, "operator_summaries": []},
+        "starting_population_root_cause": "Find Stable Swarm UI copy still said 100 agents; tuning execution always now force-clamps agents=25 in baseline, run loop, and repeatability path.",
     }
 
+
+def _build_markdown_report(summary: Dict[str, object]) -> str:
+    best = summary.get("best_config") or {}
+    candidates = summary.get("top_candidate_configs") or []
+    failures = summary.get("dominant_failure_modes") or []
+    advisory = summary.get("advisory_usage") or {}
+    lines = [
+        f"# Tuning Session Report - {summary.get('tuning_session_id')}",
+        "",
+        f"- Outcome: **{summary.get('final_outcome')}**",
+        f"- Total runs: **{summary.get('total_runs_executed')}**",
+        f"- Best score: **{summary.get('best_score')}**",
+        "",
+        "## Goal Profile",
+        "- Goal: Grow from 25 -> 100 -> stable",
+        "- Horizon: 100 generations",
+        "- Stability target: 90-110 late-run band",
+        "",
+        "## Best Run",
+        f"- Config: `{json.dumps(best, sort_keys=True)}`",
+        "",
+        "## Top Candidate Configs",
+    ]
+    for idx, row in enumerate(candidates[:3], start=1):
+        lines.append(f"- {idx}. score={row.get('score')} label={row.get('label')} params={json.dumps(row.get('params', {}), sort_keys=True)}")
+    lines += ["", "## Failure Distribution"]
+    for row in failures:
+        lines.append(f"- {row.get('label')}: {row.get('count')}")
+    lines += [
+        "",
+        "## Advisory API Usage",
+        f"- Calls: {advisory.get('calls', 0)}",
+        f"- Accepted merges: {advisory.get('accepted', 0)}",
+        f"- Operator summaries: {advisory.get('operator_summaries', [])}",
+        "",
+        "## Final Recommendation",
+        f"- {summary.get('suggested_next_tuning_direction')}",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 class GenesisHandler(BaseHTTPRequestHandler):
@@ -632,7 +1003,11 @@ class GenesisHandler(BaseHTTPRequestHandler):
                     self._json({"error": "Only find_stable_swarm mode is currently implemented"}, status=400)
                     return
 
-                thread = threading.Thread(target=_run_find_stable_swarm, args=(max(1, max_runs),), daemon=True)
+                advisory_settings = {**_advisory_defaults()}
+                for key in advisory_settings:
+                    if key in incoming:
+                        advisory_settings[key] = incoming[key]
+                thread = threading.Thread(target=_run_find_stable_swarm, args=(max(1, max_runs), advisory_settings), daemon=True)
                 thread.start()
             self._json({"status": "running"}, status=202)
             return

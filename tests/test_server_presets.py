@@ -1,4 +1,4 @@
-from src.backends.server import _phase2_adaptive_update, _stable_swarm_baseline, config_from_request, discover_presets
+from src.backends.server import _build_markdown_report, _build_tuning_summary, _phase2_adaptive_update, _stable_swarm_baseline, config_from_request, discover_presets
 
 
 def test_discover_presets_lists_experiment_configs():
@@ -127,3 +127,39 @@ def test_phase2_adaptive_update_adjusts_for_low_population():
     assert updated["upkeep_cost"] < params["upkeep_cost"]
     assert updated["anti_dominance_enabled"] is True
     assert updated["reproduction_cooldown_enabled"] is True
+
+
+def test_tuning_summary_contains_goal_and_advisory_fields():
+    summary = _build_tuning_summary(
+        session_id="s1",
+        started_at="2025-01-01T00:00:00Z",
+        elapsed_seconds=12,
+        run_records=[],
+        best_run=None,
+        candidate_configs=[],
+        failure_modes={},
+        final_outcome="No Equilibrium Found",
+        repeatability=None,
+        early_stop_reason=None,
+        session_diagnostics={},
+        advisory_settings={"advisory_api_enabled": True},
+        advisory_usage={"calls": 1, "accepted": 1, "operator_summaries": ["ok"]},
+    )
+    assert summary["goal_profile"]["starting_agents_target"] == 25
+    assert summary["advisory_usage"]["calls"] == 1
+
+
+def test_markdown_report_includes_advisory_section():
+    report = _build_markdown_report({
+        "tuning_session_id": "s1",
+        "final_outcome": "Promising Candidate Found",
+        "total_runs_executed": 2,
+        "best_score": 72.5,
+        "best_config": {"agents": 25},
+        "top_candidate_configs": [],
+        "dominant_failure_modes": [],
+        "advisory_usage": {"calls": 1, "accepted": 0, "operator_summaries": ["fallback"]},
+        "suggested_next_tuning_direction": "Tune diversity",
+    })
+    assert "## Advisory API Usage" in report
+    assert "Calls: 1" in report

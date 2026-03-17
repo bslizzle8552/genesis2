@@ -70,3 +70,29 @@ def test_jsonl_metric_streams_are_emitted(tmp_path):
     for name in ["generation_metrics.jsonl", "lineage_metrics.jsonl", "role_metrics.jsonl", "problem_metrics.jsonl"]:
         assert (run_dir / name).exists()
 
+
+
+def test_observability_exports_are_persisted(tmp_path):
+    cfg = SimulationConfig(seed=11, agents=8, generations=6, tasks_per_generation=5, log_dir=str(tmp_path))
+    result = SimulationEngine(cfg).run()
+    run_dir = Path(result["summary_path"]).parent
+
+    required = [
+        "run_summary.md",
+        "summary.json",
+        "energy_histogram.json",
+        "richest_agents.json",
+        "agents_final.json",
+        "reproduction_events.json",
+        "lineage_summary.json",
+        "artifacts_detailed.json",
+        "problem_participation.json",
+        "reward_distribution.json",
+        "observability_manifest.json",
+    ]
+    for name in required:
+        assert (run_dir / name).exists(), f"missing {name}"
+
+    manifest = (run_dir / "observability_manifest.json").read_text(encoding="utf-8")
+    assert "energy_histogram.json" in manifest
+    assert "top_10_richest_agents_panel" in manifest

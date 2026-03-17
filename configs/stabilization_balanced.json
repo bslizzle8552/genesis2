@@ -1,0 +1,40 @@
+{
+  "preset_name": "stabilization_balanced",
+  "simulation": {
+    "agents": 120,
+    "generations": 120,
+    "initial_energy": 110.0,
+    "upkeep_cost": 5.0,
+    "tasks_per_generation": 40,
+    "reproduction_threshold": 145.0,
+    "mutation_rate": 0.18
+  },
+  "diversity": {
+    "bonus": 0.6,
+    "min_lineages": 12,
+    "immigrant_injection_count": 6
+  },
+  "anti_dominance": {
+    "enabled": true,
+    "diminishing_rewards": {
+      "enabled": true,
+      "k": 250.0
+    },
+    "lineage_penalty": {
+      "enabled": true,
+      "threshold": 36.0,
+      "strength": 0.8
+    },
+    "reproduction": {
+      "cooldown_enabled": true,
+      "cooldown_generations": 3,
+      "energy_split": 0.45
+    }
+  },
+  "tier_mix": {
+    "t1": 0.30,
+    "t2": 0.30,
+    "t3": 0.24,
+    "t4": 0.16
+  }
+}

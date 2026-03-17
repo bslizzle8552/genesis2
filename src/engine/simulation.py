@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import random
@@ -59,6 +60,55 @@ class SimulationConfig:
     reproduction_cooldown_generations: int = 2
     reproduction_cost: float = 32.0
     child_energy_fraction: float = 0.5
+    preset_name: str = "custom"
+
+
+def to_unified_config_dict(config: SimulationConfig) -> Dict[str, object]:
+    return {
+        "preset_name": config.preset_name,
+        "simulation": {
+            "agents": int(config.agents),
+            "generations": int(config.generations),
+            "initial_energy": float(config.initial_energy),
+            "upkeep_cost": float(config.upkeep_cost),
+            "tasks_per_generation": int(config.tasks_per_generation),
+            "reproduction_threshold": float(config.reproduction_threshold),
+            "mutation_rate": float(config.mutation_rate),
+        },
+        "diversity": {
+            "bonus": float(config.diversity_bonus),
+            "min_lineages": int(config.diversity_min_lineages),
+            "immigrant_injection_count": int(config.immigrant_injection_count),
+        },
+        "anti_dominance": {
+            "enabled": bool(config.anti_dominance_enabled),
+            "diminishing_rewards": {
+                "enabled": bool(config.diminishing_reward_enabled),
+                "k": float(config.diminishing_reward_k),
+            },
+            "lineage_penalty": {
+                "enabled": bool(config.lineage_size_penalty_enabled),
+                "threshold": float(config.lineage_size_penalty_threshold),
+                "strength": float(config.lineage_size_penalty_multiplier),
+            },
+            "reproduction": {
+                "cooldown_enabled": bool(config.reproduction_cooldown_enabled),
+                "cooldown_generations": int(config.reproduction_cooldown_generations),
+                "energy_split": float(config.child_energy_fraction),
+            },
+        },
+        "tier_mix": {
+            "t1": float((config.tier_mix or {}).get("1", 0.34)),
+            "t2": float((config.tier_mix or {}).get("2", 0.31)),
+            "t3": float((config.tier_mix or {}).get("3", 0.21)),
+            "t4": float((config.tier_mix or {}).get("4", 0.14)),
+        },
+    }
+
+
+def config_hash_from_unified(config_data: Dict[str, object]) -> str:
+    canonical = json.dumps(config_data, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
 
 
 class SimulationEngine:
@@ -1310,18 +1360,26 @@ class SimulationEngine:
         return cleaned or "run"
 
     def _build_run_identity(self) -> Dict[str, str]:
-        label = self._sanitize_label(self.config.run_label) if self.config.run_label else ""
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        short_id = uuid.uuid4().hex[:8]
-        run_id = f"{timestamp}__{short_id}"
-        run_folder_name = f"{label}__{run_id}" if label else run_id
+        raw_preset = self.config.preset_name or "custom"
+        preset = self._sanitize_label(raw_preset)
+        label = self._sanitize_label(self.config.run_label) if self.config.run_label else preset
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        unified_config = to_unified_config_dict(self.config)
+        cfg_hash = config_hash_from_unified(unified_config)
+        run_instance_id = uuid.uuid4().hex[:8]
+        run_id = f"{timestamp}_{run_instance_id}"
+        run_folder_name = f"run_{timestamp}_{preset}_{self.config.seed}_{cfg_hash}"
         return {
             "label": label,
             "timestamp": timestamp,
-            "short_id": short_id,
+            "short_id": run_instance_id,
             "run_id": run_id,
             "run_folder_name": run_folder_name,
             "started_at": datetime.now(timezone.utc).isoformat(),
+            "config_hash": cfg_hash,
+            "run_instance_id": run_instance_id,
+            "preset_name": raw_preset,
+            "full_config": unified_config,
         }
 
     def _create_run_dir(self) -> Dict[str, object]:
@@ -1346,7 +1404,10 @@ class SimulationEngine:
         run_identity = run_setup["run_identity"]
         logger = SimulationLogger(run_dir)
         config_snapshot = asdict(self.config)
-        (run_dir / "config.json").write_text(json.dumps(config_snapshot, indent=2), encoding="utf-8")
+        full_config = dict(run_identity["full_config"])
+        full_config["config_hash"] = run_identity["config_hash"]
+        full_config["run_instance_id"] = run_identity["run_instance_id"]
+        (run_dir / "config.json").write_text(json.dumps(full_config, indent=2), encoding="utf-8")
         snapshots: List[Dict] = []
         board_events: List[Dict] = []
         all_problems: List[Problem] = []
@@ -2012,6 +2073,9 @@ class SimulationEngine:
             "run_id": run_identity["run_id"],
             "run_dir": str(run_dir),
             "run_label": run_identity["label"],
+            "preset_name": run_identity["preset_name"],
+            "config_hash": run_identity["config_hash"],
+            "run_instance_id": run_identity["run_instance_id"],
             "started_at": run_identity["started_at"],
             "final_population": len(self.agents),
             "agents": agents_snapshot,
@@ -2022,6 +2086,7 @@ class SimulationEngine:
             "report": report,
             "lineages": lineage_members,
             "config": config_snapshot,
+            "full_config": full_config,
             "phase_diagnostics": {
                 "by_generation": detected_phases,
                 "first_generation": phase_first_generation,
@@ -2063,9 +2128,13 @@ class SimulationEngine:
         manifest = {
             "run_id": run_identity["run_id"],
             "label": run_identity["label"],
+            "preset_name": run_identity["preset_name"],
+            "config_hash": run_identity["config_hash"],
+            "run_instance_id": run_identity["run_instance_id"],
             "started_at": run_identity["started_at"],
             "finished_at": finished_at,
             "config_snapshot": config_snapshot,
+            "full_config": full_config,
             "files": sorted([path.name for path in run_dir.iterdir() if path.is_file()] + ["run_manifest.json"]),
         }
         (run_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -2076,4 +2145,40 @@ class SimulationEngine:
 
 def load_config(path: str | Path) -> SimulationConfig:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if "simulation" in data:
+        simulation = data.get("simulation", {})
+        diversity = data.get("diversity", {})
+        anti = data.get("anti_dominance", {})
+        anti_repro = anti.get("reproduction", {}) if isinstance(anti, dict) else {}
+        anti_diminishing = anti.get("diminishing_rewards", {}) if isinstance(anti, dict) else {}
+        anti_lineage = anti.get("lineage_penalty", {}) if isinstance(anti, dict) else {}
+        tier_mix = data.get("tier_mix", {})
+        data = {
+            "preset_name": data.get("preset_name", "custom"),
+            "agents": simulation.get("agents", 10),
+            "generations": simulation.get("generations", 50),
+            "initial_energy": simulation.get("initial_energy", 100),
+            "upkeep_cost": simulation.get("upkeep_cost", 6),
+            "tasks_per_generation": simulation.get("tasks_per_generation", 15),
+            "reproduction_threshold": simulation.get("reproduction_threshold", 130),
+            "mutation_rate": simulation.get("mutation_rate", 0.15),
+            "diversity_bonus": diversity.get("bonus", 1.0),
+            "diversity_min_lineages": diversity.get("min_lineages", 4),
+            "immigrant_injection_count": diversity.get("immigrant_injection_count", 2),
+            "anti_dominance_enabled": anti.get("enabled", False),
+            "diminishing_reward_enabled": anti_diminishing.get("enabled", False),
+            "diminishing_reward_k": anti_diminishing.get("k", 250.0),
+            "lineage_size_penalty_enabled": anti_lineage.get("enabled", False),
+            "lineage_size_penalty_threshold": anti_lineage.get("threshold", 45),
+            "lineage_size_penalty_multiplier": anti_lineage.get("strength", 0.85),
+            "reproduction_cooldown_enabled": anti_repro.get("cooldown_enabled", False),
+            "reproduction_cooldown_generations": anti_repro.get("cooldown_generations", 2),
+            "child_energy_fraction": anti_repro.get("energy_split", 0.5),
+            "tier_mix": {
+                "1": tier_mix.get("t1", 0.34),
+                "2": tier_mix.get("t2", 0.31),
+                "3": tier_mix.get("t3", 0.21),
+                "4": tier_mix.get("t4", 0.14),
+            },
+        }
     return SimulationConfig(**data)

@@ -29,6 +29,8 @@ def test_experiment_batch_produces_comparison(tmp_path):
     payload = json.loads(summary_path.read_text(encoding="utf-8"))
     assert payload["experiment_id"] == "test_batch"
     assert len(payload["runs"]) == 2
+    assert all("scoring" in run for run in payload["runs"])
+    assert "reports" in result
 
 
 def test_anti_dominance_matrix_produces_six_runs(tmp_path):
@@ -77,3 +79,4 @@ def test_anti_dominance_matrix_produces_six_runs(tmp_path):
     assert len(payload["runs"]) == 6
     assert all("dominance_improved_vs_baseline" in row for row in payload["runs"])
     assert all("throughput_degraded_vs_baseline" in row for row in payload["runs"])
+    assert all("scoring" in row for row in payload["runs"])

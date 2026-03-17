@@ -1,0 +1,42 @@
+{
+  "experiment_id": "healthy_swarm_matrix_v1",
+  "output_root": "runs/experiments",
+  "trials_per_config": 3,
+  "scoring": {
+    "target_population": 100,
+    "target_population_tolerance": 25,
+    "gates": {
+      "min_late_avg_population": 70,
+      "max_top_lineage_share": 0.55,
+      "max_top3_lineage_share": 0.82,
+      "min_late_lineage_count": 4,
+      "min_late_births": 8,
+      "min_solve_rate": 0.25
+    }
+  },
+  "base": {
+    "seed": 42,
+    "agents": 25,
+    "generations": 120,
+    "initial_energy": 100,
+    "upkeep_cost": 6,
+    "tasks_per_generation": 40,
+    "reproduction_threshold": 130,
+    "mutation_rate": 0.22,
+    "diversity_bonus": 0.175,
+    "diversity_min_lineages": 8,
+    "immigrant_injection_count": 4,
+    "anti_dominance_enabled": true,
+    "tier_mix": {"1": 0.34, "2": 0.31, "3": 0.21, "4": 0.14}
+  },
+  "sweep": {
+    "diminishing_reward_enabled": [false, true],
+    "lineage_size_penalty_enabled": [false, true],
+    "lineage_energy_share_penalty_enabled": [false, true],
+    "reproduction_cooldown_enabled": [false, true],
+    "tasks_per_generation": [35, 45],
+    "mutation_rate": [0.18, 0.24],
+    "upkeep_cost": [5, 6],
+    "reproduction_threshold": [120, 135]
+  }
+}
